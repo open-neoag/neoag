@@ -33,6 +33,7 @@ INSTALL_BAM_MATCHER=0
 INSTALL_FACETS=0
 INSTALL_ASCAT_PYCLONE=0
 INSTALL_FUSION=0
+FUSION_INSTALL_MODE="${NEOAG_FUSION_INSTALL_MODE:-easyfuse}"
 INSTALL_SPLICE=0
 INSTALL_SNAF=1
 INSTALL_SPLICEMUTR=1
@@ -136,7 +137,8 @@ Tool groups:
   --bam-matcher              BAM-matcher plus Python 2 compatibility env via scripts/install_bam_matcher.sh
   --facets                   FACETS via scripts/install_facets.sh
   --ascat-pyclone            ASCAT + PyClone-VI via scripts/install_ascat_pyclone.sh
-  --fusion                   Arriba/Nextflow fusion env plus STAR-Fusion/FusionCatcher clones
+  --fusion                   EasyFuse-native stack; internal callers are not installed twice
+  --standalone-fusion        Explicit compatibility fallback with independent caller installs
   --splice                   RegTools + pVACsplice + SNAF + SpliceMutr (defaults) and optional splice tools
   --skip-snaf                Skip SNAF when installing the splice group
   --skip-splicemutr          Skip SpliceMutr when installing the splice group
@@ -252,6 +254,7 @@ while [[ $# -gt 0 ]]; do
     --facets) INSTALL_FACETS=1; shift ;;
     --ascat-pyclone) INSTALL_ASCAT_PYCLONE=1; shift ;;
     --fusion) INSTALL_FUSION=1; shift ;;
+    --standalone-fusion) INSTALL_FUSION=1; FUSION_INSTALL_MODE=standalone; shift ;;
     --splice) INSTALL_SPLICE=1; shift ;;
     --skip-snaf) INSTALL_SNAF=0; shift ;;
     --skip-splicemutr) INSTALL_SPLICEMUTR=0; shift ;;
@@ -691,8 +694,18 @@ register_spechla_if_requested() {
   [[ "$INSTALL_SPECHLA" == "1" ]] || return 0
   local home="$TOOLS_ROOT/tools/SpecHLA"
   local image_tar="$TOOLS_ROOT/container_images/neoag-spechla_ubuntu22.04.tar"
-  local db="$REFERENCE_ROOT/data/hla/spechla/db"
-  [[ -d "$db" ]] || db="$REFERENCE_ROOT/data/hla/spechla_db"
+  local db="" cand
+  for cand in \
+    "${SPECHLA_DB:-}" \
+    "$REFERENCE_ROOT/data/hla/spechla/db" \
+    "$REFERENCE_ROOT/data/hla/spechla_db" \
+    "$home/db"; do
+    if [[ -n "$cand" && -d "$cand" ]]; then
+      db="$cand"
+      break
+    fi
+  done
+  [[ -n "$db" ]] || db="$REFERENCE_ROOT/data/hla/spechla/db"
   if [[ "$EXECUTE" != "1" ]]; then
     log ""
     log "==> [DRY_RUN] register SpecHLA container wrappers and DB link"
@@ -801,12 +814,10 @@ install_sequenza_if_requested() {
     [[ -x "$helper" ]] || { echo "BIOC_CACHE_HELPER_MISSING: $helper" >&2; exit 47; }
     if [[ -d "$env_path" ]]; then
       run "repair Sequenza conda env" "${conda_cmd[@]}" env update -n neoag-sequenza \
-        -f "$PROJECT_ROOT/conda/env.neoag-sequenza.yml" --prune \
-        --override-channels -c conda-forge -c bioconda
+        -f "$PROJECT_ROOT/conda/env.neoag-sequenza.yml" --prune
     else
       run "install Sequenza conda env" "${conda_cmd[@]}" env create -n neoag-sequenza \
-        -f "$PROJECT_ROOT/conda/env.neoag-sequenza.yml" -y \
-        --override-channels -c conda-forge -c bioconda
+        -f "$PROJECT_ROOT/conda/env.neoag-sequenza.yml" -y
     fi
   else
     log "Sequenza env already present: $env_path"
@@ -1005,7 +1016,19 @@ export DEEPIMMUNO_DIR="$TOOLS_ROOT/tools/DeepImmuno"
 export SHERPA_PRESENTATION_HOME="$TOOLS_ROOT/tools/SHERPA-Presentation"
 export SHERPA_PRESENTATION_BIN="$TOOLS_ROOT/bin/sherpa-presentation"
 export SPECHLA_HOME="$TOOLS_ROOT/tools/SpecHLA"
-export SPECHLA_DB="$REFERENCE_ROOT/data/hla/spechla/db"
+if [[ -z "${SPECHLA_DB:-}" || ! -d "${SPECHLA_DB:-}" ]]; then
+  SPECHLA_DB=""
+  for cand in \
+    "$REFERENCE_ROOT/data/hla/spechla/db" \
+    "$REFERENCE_ROOT/data/hla/spechla_db" \
+    "$TOOLS_ROOT/tools/SpecHLA/db"; do
+    if [[ -d "$cand" ]]; then
+      SPECHLA_DB="$cand"
+      break
+    fi
+  done
+fi
+export SPECHLA_DB="${SPECHLA_DB:-$REFERENCE_ROOT/data/hla/spechla/db}"
 export SPECHLA_ENV="$CONDA_BASE/envs/neoag-tools"
 export NEOAG_BAM_MATCHER_ENV_PREFIX="$TOOLS_ROOT/conda_envs/neoag-bam-matcher"
 export BAM_MATCHER_HOME="$TOOLS_ROOT/tools/bam-matcher"
@@ -1143,7 +1166,10 @@ fi
 [[ "$INSTALL_BAM_MATCHER" == "1" ]] && { need_download_ok "BAM-matcher pinned source and compatibility environment"; run "install BAM-matcher" bash scripts/install_bam_matcher.sh; }
 [[ "$INSTALL_FACETS" == "1" ]] && run "install FACETS" bash scripts/install_facets.sh
 [[ "$INSTALL_ASCAT_PYCLONE" == "1" ]] && run "install ASCAT/PyClone-VI" bash scripts/install_ascat_pyclone.sh
-[[ "$INSTALL_FUSION" == "1" ]] && { need_download_ok "fusion tool git clones/conda packages"; run "install fusion tools" bash scripts/install_fusion_tools.sh; }
+[[ "$INSTALL_FUSION" == "1" ]] && {
+  need_download_ok "EasyFuse pinned source and driver conda packages"
+  run "install fusion tools (${FUSION_INSTALL_MODE})" env NEOAG_FUSION_INSTALL_MODE="${FUSION_INSTALL_MODE}" bash scripts/install_fusion_tools.sh
+}
 if [[ "$INSTALL_SPLICE" == "1" ]]; then
   if [[ "$INSTALL_SNAF" == "1" && "$EXECUTE" == "1" ]]; then
     need_download_ok "SNAF pinned Git source"
@@ -1245,6 +1271,7 @@ fi
     name="${item%%:*}"; enabled="${item##*:}"
     [[ "$enabled" == "1" ]] && echo "- $name"
   done
+  [[ "$INSTALL_FUSION" == "1" ]] && echo "- fusion-install-mode:$FUSION_INSTALL_MODE"
   if [[ "$RUN_REAL_VCF_SMOKE" == "1" ]]; then
     echo "- real-vcf-smoke-mhcflurry-default-on"
     [[ "$REAL_VCF_SMOKE_SKIP_MHCFLURRY" == "1" ]] && echo "- real-vcf-smoke-mhcflurry-skipped"

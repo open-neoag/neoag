@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .candidate_identity import candidate_identity, identity_value
+from .adapters.peptide_input import normalize_hla_allele
 from .utils import read_tsv
 
 REPORT_CSS = """
@@ -160,12 +161,16 @@ def _read_hla_loh_tool_results(root: Path | None, provenance: Mapping[str, Any] 
         "LOHHLA": [
             "hla_loh/lohhla/hla_loh.tsv",
             "hla_loh_consensus/lohhla_hla_loh.tsv",
+            "hla_loh_consensus/lohhla.hla_loh.tsv",
+            "lohhla.hla_loh.tsv",
             "lohhla/hla_loh.tsv",
             "hla_loh.tsv",
         ],
         "SpecHLA": [
             "hla_loh/spechla/hla_loh.tsv",
             "hla_loh_consensus/spechla_sequenza012_hla_loh.tsv",
+            "hla_loh_consensus/spechla.hla_loh.tsv",
+            "spechla.hla_loh.tsv",
             "hla_loh_consensus/spechla_hla_loh.tsv",
             "spechla/hla_loh.tsv",
             "hla_loh.spechla.tsv",
@@ -304,10 +309,8 @@ def _rna_qc_summary(rows: list[Mapping[str, Any]]) -> str:
         if event_type in {"SNV", "INDEL", "MNV"}:
             depth = _float_or_none(row.get("rna_depth"))
             alt = _float_or_none(row.get("rna_alt_reads"))
-            if depth is None and alt is None:
-                continue
             previous = variants.get(event_key)
-            if previous is None or (depth or -1) > (previous[0] or -1):
+            if previous is None or (depth if depth is not None else -1) > (previous[0] if previous[0] is not None else -1):
                 variants[event_key] = (depth, alt)
         elif event_type in {"FUSION", "SPLICE", "SPLICE_JUNCTION"}:
             reads = _float_or_none(row.get("rna_junction_reads") or row.get("junction_reads"))
@@ -326,9 +329,11 @@ def _rna_qc_summary(rows: list[Mapping[str, Any]]) -> str:
         alt3 = sum(1 for _, alt in covered if (alt or 0) >= 3)
         alt5 = sum(1 for _, alt in covered if (alt or 0) >= 5)
         zero_depth = sum(1 for depth, _ in assessed if (depth or 0) <= 0)
+        unassessed = len(variants) - len(assessed)
         parts.append(
             f"SNV/InDel位点级RNA已评估 {len(assessed)}/{len(variants)} 个独立事件；"
-            f"有覆盖 {len(covered)}，ALT reads≥1/3/5：{alt1}/{alt3}/{alt5}，深度0：{zero_depth}"
+            f"有覆盖 {len(covered)}，ALT reads≥1/3/5：{alt1}/{alt3}/{alt5}，"
+            f"深度0：{zero_depth}，位点RNA未计算：{unassessed}"
         )
     if junctions:
         assessed_junctions = [value for value in junctions.values() if value is not None]
@@ -2090,7 +2095,7 @@ def _make_patient_report_legacy(path: str | Path, bundle: ReportBundle) -> None:
     out.append(f"<li><b>评分方案：</b>{esc(bundle.profile.get('_profile_name', 'default'))}</li>")
     out.append("<li><b>临床样本关系：</b>精确取材日期、部位、治疗前后关系仍须以临床样本清单核实，本报告不据测序文件名推断。</li>")
     out.append("</ul><p class='small'>HLA 分型用于判断候选肽可能由哪些 HLA 分子呈递；它本身不证明肿瘤细胞已经加工并展示该肽段。</p>")
-    out.append("<div class='warn'><b>克隆性证据边界：</b>多数候选目前尚不能可靠判断其是否存在于大部分肿瘤细胞中，因此克隆性仍是主要证据缺口之一。</div></div>")
+    out.append(f"<div class='warn'><b>克隆性证据边界：</b>{esc(_patient_clonality_boundary(bundle))}</div></div>")
 
     out.append("<div class='section'><h2>3. 肿瘤是否具备抗原呈递条件</h2>")
     presentation_rows = [
@@ -2865,6 +2870,13 @@ _SPLICE_FUNNEL_LABELS = {
 
 
 def _patient_splice_funnel_rows(bundle: ReportBundle) -> list[dict[str, str]]:
+    has_splice_results = any(_patient_track(row) == "Splice" for row in bundle.events) or any(
+        _patient_track(row) == "Splice" for row in bundle.peptides
+    )
+    if not has_splice_results:
+        # Reused provenance may contain an old splice funnel; it must not make
+        # an SNV/InDel-only report claim that splice analysis was performed.
+        return []
     stored = bundle.provenance.get("splice_filter_funnel_rows")
     rows: list[dict[str, str]] = []
     if isinstance(stored, list):
@@ -3004,6 +3016,203 @@ def _patient_ccf_coverage_rows(bundle: ReportBundle) -> list[dict[str, str]]:
     return result
 
 
+def _patient_coding_variant_rna_rows(bundle: ReportBundle) -> list[dict[str, str]]:
+    """Summarize DNA-called SNV/InDel RNA support without mixing junction tracks."""
+    grouped: dict[str, dict[str, tuple[float | None, float | None]]] = {"SNV": {}, "InDel": {}}
+    for index, row in enumerate(bundle.events + bundle.peptides):
+        track = _patient_track(row)
+        if track not in grouped:
+            continue
+        variant_key = "|".join(str(row.get(key) or "").strip() for key in ("chrom", "pos", "ref", "alt"))
+        if not variant_key.strip("|"):
+            variant_key = ""
+        event_id = str(
+            row.get("event_group_id") or row.get("event_id") or row.get("source_event_id")
+            or variant_key or f"{track}-{index}"
+        ).strip()
+        depth = _float_or_none(_patient_observed_value(row, "rna_depth"))
+        alt = _float_or_none(_patient_observed_value(row, "rna_alt_reads"))
+        previous = grouped[track].get(event_id)
+        previous_depth = previous[0] if previous else None
+        if previous is None or (depth if depth is not None else -1) > (previous_depth if previous_depth is not None else -1):
+            grouped[track][event_id] = (depth, alt)
+
+    result: list[dict[str, str]] = []
+    totals = {key: 0 for key in ("events", "strong", "low_alt", "no_coverage", "low_coverage", "negative", "unassessed")}
+    for track in ("SNV", "InDel"):
+        observations = list(grouped[track].values())
+        if not observations:
+            continue
+        counts = {key: 0 for key in totals}
+        counts["events"] = len(observations)
+        for depth, alt in observations:
+            if depth is None and alt is None:
+                counts["unassessed"] += 1
+            elif (alt or 0) >= 3:
+                counts["strong"] += 1
+            elif (alt or 0) > 0:
+                counts["low_alt"] += 1
+            elif depth is None or depth <= 0:
+                counts["no_coverage"] += 1
+            elif depth < 10:
+                counts["low_coverage"] += 1
+            else:
+                counts["negative"] += 1
+        for key in totals:
+            totals[key] += counts[key]
+        unsupported = counts["no_coverage"] + counts["low_coverage"] + counts["negative"] + counts["unassessed"]
+        result.append({
+            "编码变异赛道": track,
+            "DNA检出事件": str(counts["events"]),
+            "RNA ALT≥3": str(counts["strong"]),
+            "RNA ALT 1–2": str(counts["low_alt"]),
+            "RNA无覆盖": str(counts["no_coverage"]),
+            "RNA低覆盖且ALT=0": str(counts["low_coverage"]),
+            "RNA充分覆盖且ALT=0": str(counts["negative"]),
+            "位点RNA未计算": str(counts["unassessed"]),
+            "DNA有、RNA无直接支持": f"{unsupported}/{counts['events']}（{100.0 * unsupported / counts['events']:.1f}%）",
+        })
+    if len(result) > 1:
+        unsupported = totals["no_coverage"] + totals["low_coverage"] + totals["negative"] + totals["unassessed"]
+        result.append({
+            "编码变异赛道": "SNV+InDel合计",
+            "DNA检出事件": str(totals["events"]),
+            "RNA ALT≥3": str(totals["strong"]),
+            "RNA ALT 1–2": str(totals["low_alt"]),
+            "RNA无覆盖": str(totals["no_coverage"]),
+            "RNA低覆盖且ALT=0": str(totals["low_coverage"]),
+            "RNA充分覆盖且ALT=0": str(totals["negative"]),
+            "位点RNA未计算": str(totals["unassessed"]),
+            "DNA有、RNA无直接支持": f"{unsupported}/{totals['events']}（{100.0 * unsupported / totals['events']:.1f}%）",
+        })
+    return result
+
+
+def _patient_experiment_entry_gate_rows(bundle: ReportBundle) -> list[dict[str, str]]:
+    """Audit peptide-HLA gates required before first-batch experimental entry."""
+    candidates: list[Mapping[str, Any]] = []
+    seen: set[str] = set()
+    for index, row in enumerate(bundle.peptides):
+        key = "|".join(str(row.get(field) or "").strip() for field in ("event_id", "peptide", "hla_allele"))
+        if not key.strip("|"):
+            key = f"candidate-{index}"
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(row)
+    if not candidates:
+        return []
+
+    total = len(candidates)
+    presentation = {"pass": 0, "caution": 0, "hard": 0, "unassessed": 0}
+    safety = {"pass": 0, "caution": 0, "hard": 0, "unassessed": 0}
+    exact_match = {"pass": 0, "caution": 0, "hard": 0, "unassessed": 0}
+    appm = {"pass": 0, "caution": 0, "hard": 0, "unassessed": 0}
+
+    def explicit_true(value: Any) -> bool:
+        return str(value or "").strip().upper() in {"TRUE", "YES", "1", "DETECTED", "EXACT_MATCH", "MATCH"}
+
+    def explicit_false(value: Any) -> bool:
+        return str(value or "").strip().upper() in {"FALSE", "NO", "0", "NOT_DETECTED", "NO_MATCH", "NEGATIVE"}
+
+    for row in candidates:
+        p_state = str(row.get("presentation_consensus_state") or row.get("presentation_consensus_status") or "").upper()
+        if "CONSISTENT_STRONG" in p_state or "PRESENTATION_MODERATE" in p_state:
+            presentation["pass"] += 1
+        elif "PRESENTATION_WEAK" in p_state:
+            presentation["hard"] += 1
+        elif any(token in p_state for token in ("DISCORDANT", "SINGLE_TOOL")):
+            presentation["caution"] += 1
+        else:
+            presentation["unassessed"] += 1
+
+        hard_codes = " ".join(str(row.get(field) or "").upper() for field in ("hard_failure_codes", "source_chain_hard_failure_codes"))
+        exact_value = row.get("reference_proteome_exact_match") or row.get("event_reference_proteome_exact_match")
+        exact_status = str(row.get("normal_proteome_exact_match_status") or row.get("reference_proteome_status") or "").upper()
+        if explicit_true(exact_value) or "HARD_REFERENCE_PROTEOME_MATCH" in hard_codes or exact_status in {"DETECTED", "EXACT_MATCH", "MATCH"}:
+            exact_match["hard"] += 1
+        elif explicit_false(exact_value) or any(token in exact_status for token in ("NOT_DETECTED", "NO_MATCH", "NEGATIVE", "PASS")):
+            exact_match["pass"] += 1
+        else:
+            exact_match["unassessed"] += 1
+
+        safety_state = str(row.get("safety_state") or row.get("safety_status") or row.get("safety_tier") or "").upper()
+        missing_layers = str(row.get("safety_missing_layers") or row.get("event_safety_missing_layers") or "").strip()
+        if any(token in hard_codes for token in ("HARD_REFERENCE_PROTEOME_MATCH", "HARD_NORMAL_JUNCTION", "HARD_SAFETY_REJECT")) or any(token in safety_state for token in ("REJECT", "FAIL", "HIGH_RISK")):
+            safety["hard"] += 1
+        elif "PASS" in safety_state and not missing_layers and "PARTIAL" not in safety_state:
+            safety["pass"] += 1
+        elif safety_state and "UNASSESSED" not in safety_state:
+            safety["caution"] += 1
+        else:
+            safety["unassessed"] += 1
+
+        appm_value = str(
+            row.get("appm_evidence_completeness")
+            or bundle.appm_summary.get("appm_evidence_completeness")
+            or ""
+        ).strip()
+        appm_state = str(row.get("appm_integrity_status") or row.get("hla_appm_state") or "").upper()
+        try:
+            appm_numeric = float(appm_value)
+        except (TypeError, ValueError):
+            appm_numeric = None
+        if any(token in appm_state for token in ("MAJOR_APPM_DEFECT", "REJECT", "BLOCK")):
+            appm["hard"] += 1
+        elif (appm_numeric is not None and appm_numeric >= 0.8) or "COMPLETE" in appm_value.upper() or "RETAINED" in appm_state:
+            appm["pass"] += 1
+        elif appm_value and "UNASSESSED" not in appm_value.upper():
+            appm["caution"] += 1
+        else:
+            appm["unassessed"] += 1
+
+    def gate_row(name: str, counts: Mapping[str, int], impact: str) -> dict[str, str]:
+        return {
+            "实验入口门控": name,
+            "适用Peptide–HLA": str(total),
+            "支持进入": str(counts["pass"]),
+            "谨慎/封顶": str(counts["caution"]),
+            "明确阻断": str(counts["hard"]),
+            "未评估": str(counts["unassessed"]),
+            "对候选的影响": impact,
+        }
+
+    rows = [
+        gate_row("NetMHCpan/MHCflurry核心呈递共识", presentation, "不一致或仅单工具支持通常最高进入R3审阅；两个核心工具一致弱则进入R4"),
+        gate_row("正常蛋白组精确匹配", exact_match, "检出与正常参考蛋白完全相同的肽属于硬失败，进入R4并暂缓"),
+        gate_row("自身相似性与正常组织风险筛查", safety, "证据部分完整只能进入补证或审阅；明确同序列/正常连接排除证据进入R4"),
+        gate_row("HLA/APPM证据完整度", appm, "APPM低或未评估会限制进入首批实验；事件真实不能补偿呈递链缺口"),
+    ]
+
+    fusion_rows = [row for row in candidates if _patient_track(row) == "Fusion"]
+    if fusion_rows:
+        fusion = {"pass": 0, "caution": 0, "hard": 0, "unassessed": 0}
+        for row in fusion_rows:
+            normal = " ".join(str(row.get(field) or "").upper() for field in (
+                "normal_junction_assessment_status", "normal_transcript_junction_match_status",
+                "normal_background_status", "readthrough_status",
+            ))
+            if any(token in normal for token in ("SUPPORTED_IN_NORMAL", "DETECTED_MATCHED_NORMAL", "EXACT_MATCH")):
+                fusion["hard"] += 1
+            elif any(token in normal for token in ("NOT_DETECTED_ADEQUATE_COVERAGE", "NOT_DETECTED", "NEGATIVE", "PASS")):
+                fusion["pass"] += 1
+            elif normal.strip() and not any(token in normal for token in ("UNASSESSED", "MISSING", "NOT_AVAILABLE")):
+                fusion["caution"] += 1
+            else:
+                fusion["unassessed"] += 1
+        fusion_total = len(fusion_rows)
+        rows.append({
+            "实验入口门控": "Fusion精确断点级正常背景",
+            "适用Peptide–HLA": str(fusion_total),
+            "支持进入": str(fusion["pass"]),
+            "谨慎/封顶": str(fusion["caution"]),
+            "明确阻断": str(fusion["hard"]),
+            "未评估": str(fusion["unassessed"]),
+            "对候选的影响": "缺少精确断点/正常read-through参考时不能把真实融合直接表述为可进入注射或首批功能实验的候选",
+        })
+    return rows
+
+
 def _patient_candidate_integrity(row: Mapping[str, Any]) -> tuple[bool, list[str]]:
     missing: list[str] = []
     if not str(row.get("event_id") or "").strip():
@@ -3080,7 +3289,7 @@ def _patient_restricting_hla_reliability(
     """Classify whether the restricting-allele LOH call is reliable for stratification."""
     if bundle is None:
         return False, "限制性HLA未评估"
-    allele = str(row.get("hla_allele") or row.get("allele") or "").strip()
+    allele = normalize_hla_allele(str(row.get("hla_allele") or row.get("allele") or "").strip())
     if not allele:
         return False, "限制性HLA缺失"
     loh_rows, _ = _patient_hla_loh_consensus(bundle)
@@ -3101,7 +3310,7 @@ def _patient_restricting_hla_gap(
     """Return a candidate-specific HLA-LOH limitation with tool details."""
     if bundle is None:
         return "限制性HLA未评估"
-    allele = str(row.get("hla_allele") or row.get("allele") or "").strip()
+    allele = normalize_hla_allele(str(row.get("hla_allele") or row.get("allele") or "").strip())
     if not allele:
         return "限制性HLA未评估"
     loh_rows, _ = _patient_hla_loh_consensus(bundle)
@@ -3719,6 +3928,8 @@ def _patient_missing_rna_label(row: Mapping[str, Any], label: str, *, expression
             return "转录本表达无法精确匹配（融合转录本无法唯一对应定量矩阵中的标准转录本）；按融合伙伴基因表达和断点支持reads解读"
         if transcript and _patient_track(row) == "Splice":
             return "转录本表达无法精确匹配（异常剪接异构体无法唯一对应定量矩阵中的标准转录本）；按基因表达和精确junction reads解读"
+        if status == "UNASSESSED_EMPTY_INPUT":
+            return f"{label}未计算（表达输入文件为空，仅有表头）"
         if status == "UNASSESSED_ID_NOT_MAPPED":
             return f"{label}未匹配到表达矩阵ID"
         if source:
@@ -3728,6 +3939,12 @@ def _patient_missing_rna_label(row: Mapping[str, Any], label: str, *, expression
     status = _patient_observed_source(row, "rna_support_status", "rna_evidence_completeness")
     depth = _patient_observed_value(row, "rna_depth")
     alt_reads = _patient_observed_value(row, "rna_alt_reads")
+    if label == "RNA VAF" and depth is not None:
+        try:
+            if float(depth) <= 0:
+                return "RNA VAF无法计算（RNA位点深度为0）"
+        except ValueError:
+            pass
     if depth is not None or alt_reads is not None:
         return f"{label} 0.0000（RNA位点已评估但未检测到ALT或深度为0）"
     if source:
@@ -3750,20 +3967,61 @@ def _patient_dna_vcf_measurements(row: Mapping[str, Any]) -> str:
         vaf = _patient_numeric_display(_patient_observed_value(row, vaf_field), 4)
         if depth is None and alt is None and vaf is None:
             continue
+        ref_reads = None
+        if depth is not None and alt is not None:
+            try:
+                ref_reads = f"{max(float(depth) - float(alt), 0):.0f}"
+            except ValueError:
+                pass
         parts = []
         if depth is not None:
             parts.append(f"深度 {depth}")
+        if ref_reads is not None:
+            parts.append(f"REF reads {ref_reads}")
         if alt is not None:
             parts.append(f"ALT reads {alt}")
         if vaf is not None:
             parts.append(f"VAF {vaf}")
         blocks.append(f"{label}（{'，'.join(parts)}）")
+    normal_depth = _patient_numeric_display(_patient_observed_value(row, "normal_depth"), 0)
+    normal_alt = _patient_numeric_display(
+        _patient_observed_source(row, "normal_alt_count", "normal_alt_reads"), 0
+    )
+    normal_vaf = _patient_numeric_display(
+        _patient_observed_source(row, "normal_alt_vaf", "normal_vaf"), 4
+    )
+    if normal_depth is not None or normal_alt is not None or normal_vaf is not None:
+        normal_ref = None
+        if normal_depth is not None and normal_alt is not None:
+            try:
+                normal_ref = f"{max(float(normal_depth) - float(normal_alt), 0):.0f}"
+            except ValueError:
+                pass
+        parts = []
+        if normal_depth is not None:
+            parts.append(f"深度 {normal_depth}")
+        if normal_ref is not None:
+            parts.append(f"REF reads {normal_ref}")
+        if normal_alt is not None:
+            parts.append(f"ALT reads {normal_alt}")
+        if normal_vaf is not None:
+            parts.append(f"VAF {normal_vaf}")
+        blocks.append(f"配对正常DNA/VCF（{'，'.join(parts)}）")
     return "；".join(blocks)
 
 
 def _patient_dna_sv_measurements(row: Mapping[str, Any]) -> str:
     """Render DNA structural-variant support without borrowing RNA junction fields."""
     parts: list[str] = []
+    status = _patient_observed_source(row, "dna_sv_confirmation_status")
+    if status:
+        labels = {
+            "SUPPORTED": "DNA-SV支持",
+            "NOT_DETECTED": "未检出兼容DNA-SV断点",
+            "AMBIGUOUS": "DNA-SV断点关联有歧义",
+            "UNASSESSED": "DNA-SV未正式评估",
+        }
+        parts.append(labels.get(status.upper(), f"DNA-SV状态 {status}"))
     for label, fields in (
         ("断点支持reads", ("dna_sv_support_reads", "wgs_sv_support_reads", "sv_support_reads")),
         ("split reads", ("dna_sv_split_reads", "wgs_sv_split_reads", "sv_split_reads", "split_reads")),
@@ -3776,29 +4034,52 @@ def _patient_dna_sv_measurements(row: Mapping[str, Any]) -> str:
         display = _patient_numeric_display(value, 0) if value is not None else None
         if display is not None:
             parts.append(f"{label} {display}")
-    caller = _patient_observed_source(row, "dna_sv_caller", "wgs_sv_caller", "sv_caller")
+    caller = _patient_observed_source(row, "dna_sv_callers", "dna_sv_caller", "wgs_sv_caller", "sv_caller")
     if caller:
         parts.append(f"DNA-SV caller {caller}")
+    adjacency = _patient_observed_source(row, "dna_sv_adjacency_key")
+    if adjacency:
+        parts.append(f"adjacency {adjacency}")
+    method = _patient_observed_source(row, "dna_sv_match_method")
+    if method:
+        parts.append(f"RNA关联方式 {method}")
+    reason = _patient_observed_source(row, "dna_sv_match_reason")
+    if reason:
+        parts.append(f"关联说明 {reason}")
     return "，".join(parts)
+
+
+def _patient_sample_identity(row: Mapping[str, Any]) -> str:
+    status = _patient_observed_source(row, "sample_identity_status")
+    if not status:
+        return ""
+    labels = {"MATCH": "肿瘤与正常BAM身份匹配", "MISMATCH": "肿瘤与正常BAM身份不匹配", "INSUFFICIENT_DATA": "BAM身份位点不足"}
+    detail = labels.get(status.upper(), f"BAM身份状态 {status}")
+    sites = _patient_observed_source(row, "sample_identity_sites_compared")
+    confidence = _patient_observed_source(row, "sample_identity_confidence")
+    extras = [item for item in (f"比较位点 {sites}" if sites else "", f"置信度 {confidence}" if confidence else "") if item]
+    return detail + (f"（{'，'.join(extras)}）" if extras else "")
 
 
 def _patient_dna_evidence(row: Mapping[str, Any]) -> str:
     """Describe DNA evidence using an event-appropriate measurement model."""
     track = _patient_track(row)
+    identity = _patient_sample_identity(row)
+    suffix = f"；{identity}" if identity else ""
     if track in {"SNV", "InDel"}:
         measurements = _patient_dna_vcf_measurements(row)
-        return f"DNA/VCF数据：{measurements or '未接入或未评估'}"
+        return f"DNA/VCF数据：{measurements or '未接入或未评估'}{suffix}"
     if track in {"Fusion", "DNA SV"}:
         measurements = _patient_dna_sv_measurements(row)
         if measurements:
-            return f"DNA/SV数据：{measurements}"
+            return f"DNA/SV数据：{measurements}{suffix}"
         if track == "Fusion":
-            return "DNA/SV数据：未接入或未评估；当前融合仅按RNA断点证据评估"
-        return "DNA/SV数据：未接入或未评估"
+            return f"DNA/SV数据：未接入或未评估；当前融合仅按RNA断点证据评估{suffix}"
+        return f"DNA/SV数据：未接入或未评估{suffix}"
     if track == "Splice":
         return "DNA证据：点突变VCF口径不适用；当前异常剪接按RNA junction证据评估"
     measurements = _patient_dna_vcf_measurements(row)
-    return f"DNA数据：{measurements}" if measurements else "DNA数据：未接入或未评估"
+    return f"DNA数据：{measurements}{suffix}" if measurements else f"DNA数据：未接入或未评估{suffix}"
 
 
 def _patient_dna_rna_interpretation(row: Mapping[str, Any]) -> str:
@@ -4213,6 +4494,36 @@ def _patient_fusion_boundary_evidence(row: Mapping[str, Any], bundle: ReportBund
     return mapping + "；" + comparison + "；" + orf_layer
 
 
+def _patient_fusion_consensus_evidence(row: Mapping[str, Any]) -> str:
+    if _patient_track(row) != "Fusion":
+        return ""
+    status = str(row.get("candidate_union_source") or "UNASSESSED").strip().upper()
+    callers = [item.strip() for item in re.split(r"[;,|+]", str(row.get("internal_tools") or "")) if item.strip()]
+    try:
+        caller_count = int(float(str(row.get("internal_tool_count") or len(callers) or 0)))
+    except ValueError:
+        caller_count = len(callers)
+    details = str(row.get("internal_high_confidence_reason") or "")
+    dna_status = str(row.get("dna_sv_confirmation_status") or "UNASSESSED").strip().upper()
+    if status == "SHORT_READ_MULTI_CALLER":
+        short_read = f"固定短读面板多caller支持（{caller_count}个：{','.join(callers)}）"
+    elif status == "SHORT_READ_SINGLE_CALLER":
+        short_read = f"固定短读面板仅单caller支持（{','.join(callers) or 'caller未记录'}）"
+    elif status.startswith("TARGETED_RESCUE"):
+        short_read = f"定向rescue事件（固定caller信号：{','.join(callers) or '无可判定支持'}）；不等同于EasyFuse PASS或正式多caller共识"
+    elif status == "AGGREGATOR_ONLY":
+        short_read = "仅EasyFuse聚合层记录；内部固定caller支持未形成可判定共识"
+    else:
+        short_read = "固定短读caller共识未评估"
+    orthogonal = []
+    if "long_read=" in details:
+        long_read = details.split("long_read=", 1)[1].split(";", 1)[0].strip()
+        if long_read and long_read.lower() != "none":
+            orthogonal.append(f"长读={long_read}")
+    orthogonal.append(f"DNA-SV={dna_status}")
+    return short_read + "；正交层：" + "，".join(orthogonal)
+
+
 def _patient_event_evidence_and_next_step(
     row: Mapping[str, Any], bundle: ReportBundle, val_map: Mapping[str, Mapping[str, str]],
     *, compact_common: bool = False,
@@ -4226,6 +4537,9 @@ def _patient_event_evidence_and_next_step(
     hypothesis_count = int(str(row.get("patient_display_hypothesis_count") or "1"))
     if track == "Fusion" and hypothesis_count > 1:
         evidence.append(f"患者报告已合并展示{hypothesis_count}个断点/转录本假设；事件级结果仍分别保留")
+    fusion_consensus = _patient_fusion_consensus_evidence(row)
+    if fusion_consensus:
+        evidence.append(fusion_consensus)
     if not (compact_common and track in {"Fusion", "Splice"}):
         evidence.append(_patient_metric("MT/WT", row, "mutant_specificity_status", "mutant_specificity_state"))
     gaps = _patient_key_gaps(row, bundle)
@@ -4519,6 +4833,92 @@ def _patient_fusion_artifact_review(row: Mapping[str, Any]) -> str:
     return ""
 
 
+def _patient_fusion_narrative_tier(
+    row: Mapping[str, Any], bundle: ReportBundle | None,
+) -> tuple[str, str, str]:
+    """Separate disease anchors from ordinary and tissue-background fusions."""
+    if _patient_track(row) != "Fusion":
+        return "NOT_APPLICABLE", "不适用", "非融合事件"
+    anchor = _disease_anchor(row, bundle)
+    if anchor:
+        return (
+            "DISEASE_ANCHOR",
+            "疾病锚定融合",
+            str(anchor.get("molecular_significance") or anchor.get("label") or "疾病知识库锚定事件"),
+        )
+
+    normal_status = " ".join(str(row.get(field) or "").strip().upper() for field in (
+        "normal_junction_assessment_status", "normal_transcript_junction_match_status",
+        "normal_background_status", "readthrough_status",
+    ))
+    normal_detected = any(token in normal_status for token in (
+        "SUPPORTED_IN_NORMAL", "DETECTED_MATCHED_NORMAL", "DETECTED_BROAD_NORMAL",
+        "EXACT_MATCH", "READTHROUGH", "READ-THROUGH",
+    )) and not any(token in normal_status for token in ("NOT_DETECTED", "NEGATIVE"))
+    artifact = _patient_fusion_artifact_review(row)
+    if normal_detected or artifact:
+        reason = "正常junction/read-through背景已命中" if normal_detected else artifact
+        return "BACKGROUND_REVIEW", "组织背景/伪影复核", reason
+
+    config = {}
+    if bundle is not None:
+        configured = bundle.provenance.get("fusion_background_review")
+        config = dict(configured) if isinstance(configured, Mapping) else {}
+    try:
+        threshold = float(config.get("high_normal_tissue_tpm", 100.0))
+    except (TypeError, ValueError):
+        threshold = 100.0
+    normal_tpm = _float_or_none(_patient_observed_value(row, "normal_tissue_max_tpm"))
+    normal_tissue = str(row.get("normal_tissue_max_tissue") or row.get("critical_tissue_name") or "正常组织").strip()
+    if normal_tpm is not None and normal_tpm >= threshold:
+        return (
+            "BACKGROUND_REVIEW",
+            "组织背景/伪影复核",
+            f"融合伙伴在正常组织中高表达（{normal_tissue}最高{normal_tpm:g} TPM；审阅阈值{threshold:g} TPM）；"
+            "该信息不证明融合连接存在于正常组织，但要求优先排查组织背景和通读转录",
+        )
+    return "ORDINARY_CANDIDATE", "普通融合候选", "未命中疾病锚定或明确组织背景规则；仍需完成断点、ORF和正常背景核对"
+
+
+def _patient_fusion_narrative_sort_key(row: Mapping[str, Any], bundle: ReportBundle | None) -> int:
+    tier, _, _ = _patient_fusion_narrative_tier(row, bundle)
+    return {"DISEASE_ANCHOR": 0, "ORDINARY_CANDIDATE": 1, "BACKGROUND_REVIEW": 2}.get(tier, 3)
+
+
+def _patient_fusion_narrative_rows(bundle: ReportBundle) -> list[dict[str, str]]:
+    grouped: dict[str, tuple[str, str, str]] = {}
+    precedence = {"DISEASE_ANCHOR": 0, "BACKGROUND_REVIEW": 1, "ORDINARY_CANDIDATE": 2}
+    for row in bundle.events + bundle.peptides:
+        if _patient_track(row) != "Fusion":
+            continue
+        identity = _patient_manual_review_identity(row)
+        tier = _patient_fusion_narrative_tier(row, bundle)
+        previous = grouped.get(identity)
+        if previous is None or precedence.get(tier[0], 9) < precedence.get(previous[0], 9):
+            grouped[identity] = tier
+    if not grouped:
+        return []
+    labels = {
+        "DISEASE_ANCHOR": ("疾病锚定融合", "作为疾病机制中心单独解释；优先核实断点、方向、ORF和跨断点肽，不自动提升R等级"),
+        "ORDINARY_CANDIDATE": ("普通融合候选", "保留在常规融合证据链中，按断点、frame、多caller、正常背景和呈递结果审阅"),
+        "BACKGROUND_REVIEW": ("组织背景/伪影复核", "高正常组织表达、read-through、正常junction或复杂标注事件；不计入治疗叙事中的优先融合负担"),
+    }
+    rows: list[dict[str, str]] = []
+    for tier in ("DISEASE_ANCHOR", "ORDINARY_CANDIDATE", "BACKGROUND_REVIEW"):
+        matching = [value for value in grouped.values() if value[0] == tier]
+        if not matching:
+            continue
+        label, interpretation = labels[tier]
+        examples = list(dict.fromkeys(reason for _, _, reason in matching if reason))[:2]
+        rows.append({
+            "融合叙事分层": label,
+            "独立融合事件": str(len(matching)),
+            "报告中的解释": interpretation,
+            "代表性依据": "；".join(examples) or "按结构化融合证据分层",
+        })
+    return rows
+
+
 def _patient_attention_reasons(row: Mapping[str, Any], bundle: ReportBundle | None = None) -> list[str]:
     reasons: list[str] = []
     anchor = _disease_anchor(row, bundle)
@@ -4541,7 +4941,13 @@ def _patient_attention_reasons(row: Mapping[str, Any], bundle: ReportBundle | No
     sources = str(row.get("source_tools") or row.get("source_chain_orthogonal_sources") or "")
     source_count = len([part for part in re.split(r"[;,|+]", sources) if part.strip()])
     orthogonal = str(row.get("source_chain_orthogonal_status") or "").upper()
-    if source_count >= 2 or any(token in orthogonal for token in ("SUPPORTED", "CONCORDANT", "PASS")):
+    fusion_fixed_count = 0
+    if _patient_track(row) == "Fusion":
+        try:
+            fusion_fixed_count = int(float(str(row.get("internal_tool_count") or "0")))
+        except ValueError:
+            fusion_fixed_count = 0
+    if fusion_fixed_count >= 2 or (_patient_track(row) != "Fusion" and source_count >= 2) or any(token in orthogonal for token in ("SUPPORTED", "CONCORDANT", "PASS")):
         reasons.append("获得多工具或正交证据支持")
     cross_platform = str(row.get("cross_platform_status") or "").upper()
     if "CONSISTENT" in cross_platform or "CONCORDANT" in cross_platform:
@@ -4613,7 +5019,7 @@ def _patient_manual_review_rows(
     for peptide in peptides:
         for key in _patient_event_keys(peptide):
             peptide_by_event.setdefault(key, peptide)
-    scored: list[tuple[int, int, int, dict[str, str], list[str]]] = []
+    scored: list[tuple[int, int, int, int, dict[str, str], list[str]]] = []
     seen: set[str] = set()
     for index, event in enumerate(events):
         keys = _patient_event_keys(event)
@@ -4631,10 +5037,11 @@ def _patient_manual_review_rows(
         if not reasons:
             continue
         mechanism_priority = bool(_disease_anchor(row, bundle))
-        scored.append((0 if configured or mechanism_priority else 1, -len(reasons), index, row, list(dict.fromkeys(reasons))))
+        background_priority = 1 if _patient_fusion_narrative_sort_key(row, bundle) == 2 else 0
+        scored.append((0 if configured or mechanism_priority else 1, background_priority, -len(reasons), index, row, list(dict.fromkeys(reasons))))
     result: list[dict[str, str]] = []
     displayed: set[str] = set()
-    for _, _, _, row, reasons in sorted(scored):
+    for _, _, _, _, row, reasons in sorted(scored):
         identity = _patient_manual_review_identity(row)
         if identity in displayed:
             continue
@@ -4750,6 +5157,85 @@ def _patient_purity_consensus(bundle: ReportBundle) -> tuple[str, str]:
     return fallback, "未提供结构化多工具共识；不得静默选择单一工具"
 
 
+def _patient_clonality_boundary(bundle: ReportBundle) -> str:
+    """Explain sample purity and event-level CCF as separate evidence layers."""
+    consensus = bundle.purity_consensus if isinstance(bundle.purity_consensus, Mapping) else {}
+    status = str(consensus.get("status") or "").upper()
+    purity_text = str(consensus.get("recommended_purity") or "").strip()
+    try:
+        purity = float(purity_text)
+    except (TypeError, ValueError):
+        purity = None
+
+    tool_rows = [row for row in bundle.purity_tools if isinstance(row, Mapping)]
+    assessed_tools = [
+        str(row.get("tool") or row.get("source") or "未记录")
+        for row in tool_rows
+        if str(row.get("status") or "").upper() not in {"", "MISSING", "UNASSESSED", "NOT_RUN"}
+        and str(row.get("purity") or "").strip().upper() not in {"", "NA", "N/A", "NONE", "."}
+    ]
+    conflict_terms = ("CONFLICT", "DISCORDANT", "OUTLIER", "EXCLUDED", "REJECTED")
+    tool_conflicts = [
+        str(row.get("tool") or row.get("source") or "未记录")
+        for row in tool_rows
+        if any(term in " ".join(str(row.get(key) or "").upper() for key in ("status", "note")) for term in conflict_terms)
+    ]
+
+    coverage_rows = _patient_ccf_coverage_rows(bundle)
+    eligible = reliable = low = unresolved = 0
+    for row in coverage_rows:
+        total = int(str(row.get("独立事件") or "0"))
+        not_applicable = int(str(row.get("RNA-only不适用") or "0"))
+        eligible += max(0, total - not_applicable)
+        reliable += int(str(row.get("可靠CCF") or "0"))
+        low += int(str(row.get("低置信数值") or "0"))
+        unresolved += int(str(row.get("缺失/未解析") or "0"))
+    coverage = (100.0 * reliable / eligible) if eligible else None
+    ccf_summary = (
+        f"可进行DNA克隆性评估的{eligible}个事件中，{reliable}个形成可靠CCF"
+        + (f"（{coverage:.1f}%）" if coverage is not None else "")
+        + f"，{low}个仅有低置信数值，{unresolved}个缺失或未解析。"
+        if eligible else
+        "当前事件均不适合由RNA证据直接推导DNA CCF。"
+    )
+
+    if "LOW_PURITY" in status or (purity is not None and purity < 0.20):
+        sample = f"样本级推荐纯度为{purity_text}" if purity_text else "样本级纯度较低"
+        return (
+            f"{sample}，属于低纯度审阅情形；即使已有纯度/倍性背景，事件VAF和局部拷贝数的不确定性仍会系统性降低CCF置信度。"
+            f"{ccf_summary}低置信或缺失CCF不解释为候选不存在于肿瘤细胞中。"
+        )
+
+    if tool_conflicts or any(term in status for term in ("CONFLICT", "DISCORDANT", "OUTLIER", "REVIEW")):
+        conflict_label = "、".join(dict.fromkeys(tool_conflicts)) or "部分工具"
+        return (
+            f"样本级纯度/倍性已有{len(assessed_tools)}个工具结果，但{conflict_label}存在冲突、离群或被排除状态；"
+            "报告并列保留全部工具结果，共识值仅用于后续计算，不把单一数值写成确定结论。"
+            f"{ccf_summary}事件级克隆性需结合所采用的纯度、局部CN和VAF继续解释。"
+        )
+
+    if "CONCORDANT" in status or len(assessed_tools) >= 2:
+        if coverage is not None and coverage < 80.0:
+            return (
+                f"样本级纯度/倍性已有多工具一致或相互支持的估计，可作为CNV与LOH的计算背景。{ccf_summary}"
+                "当前缺口是事件级CCF覆盖不足，而不是缺少样本纯度估计；不能据此声称多数候选已覆盖大部分肿瘤细胞。"
+            )
+        return (
+            f"样本级纯度/倍性已有多工具一致或相互支持的估计。{ccf_summary}"
+            "可靠CCF仍是计算性克隆覆盖证据，不等同于实验确认。"
+        )
+
+    if purity_text:
+        return (
+            f"当前已有样本级纯度估计（{purity_text}），但尚未形成充分的多工具一致性结论。{ccf_summary}"
+            "需分别审阅样本级纯度可信度和事件级CCF覆盖，二者不能互相替代。"
+        )
+    return (
+        f"样本级纯度/倍性尚未形成可用共识。{ccf_summary}"
+        "在纯度、局部CN和VAF输入补齐前，事件级克隆性仅作未评估处理。"
+    )
+
+
 def _patient_disease_background(bundle: ReportBundle) -> tuple[str, str]:
     """Resolve structured clinical diagnosis without inferring it from analysis profiles."""
     provenance = bundle.provenance
@@ -4855,7 +5341,7 @@ def _patient_hla_loh_consensus(bundle: ReportBundle) -> tuple[list[dict[str, str
     by_tool: dict[str, dict[str, set[str]]] = {"LOHHLA": {}, "SpecHLA": {}}
     tool_evidence: dict[str, dict[str, bool]] = {"LOHHLA": {}, "SpecHLA": {}}
     for record in bundle.hla_loh_tool_results:
-        allele = str(record.get("hla_allele") or record.get("allele") or "").strip()
+        allele = normalize_hla_allele(str(record.get("hla_allele") or record.get("allele") or "").strip())
         if not re.match(r"^HLA-[ABC]\*", allele):
             continue
         tool = str(record.get("_report_tool") or record.get("evidence_tool") or record.get("source_tool") or record.get("tool") or "")
@@ -4868,7 +5354,7 @@ def _patient_hla_loh_consensus(bundle: ReportBundle) -> tuple[list[dict[str, str
         tool_evidence[tool][allele] = tool_evidence[tool].get(allele, False) or has_evidence or bool(record.get("_report_source"))
 
     restricting = sorted({
-        str(row.get("hla_allele") or row.get("allele") or "").strip()
+        normalize_hla_allele(str(row.get("hla_allele") or row.get("allele") or "").strip())
         for row in bundle.peptides
         if re.match(r"^HLA-[ABC]\*", str(row.get("hla_allele") or row.get("allele") or "").strip())
     })
@@ -4905,10 +5391,17 @@ def _patient_hla_loh_consensus(bundle: ReportBundle) -> tuple[list[dict[str, str
             other_tool = "SpecHLA" if tool == "LOHHLA" else "LOHHLA"
             consensus = f"仅{tool}报告{_patient_hla_loh_label(internal)}，证据有限"
             if evidence_present[other_tool]:
-                explanation = (
-                    f"{other_tool}有原始证据，但未形成可用逐等位基因LOH判断/QC未通过；"
-                    "单工具结果不足以确认该等位基因在肿瘤中完整保留或丢失"
-                )
+                if other_tool == "LOHHLA":
+                    explanation = (
+                        "LOHHLA有原始证据，但未形成可用逐等位基因判断；应核查HLA比对、胚系等位基因、"
+                        "CopyNumLoc/纯度倍性参数及运行QC的输入对接，不应归因于Sequenza或ASCAT未运行。"
+                        "当前单工具结果不足以确认该等位基因在肿瘤中完整保留或丢失"
+                    )
+                else:
+                    explanation = (
+                        f"{other_tool}有原始证据，但未形成可用逐等位基因LOH判断/QC未通过；"
+                        "单工具结果不足以确认该等位基因在肿瘤中完整保留或丢失"
+                    )
             else:
                 explanation = (
                     f"另一个HLA LOH工具未提供该等位基因结果；"
@@ -4939,7 +5432,7 @@ def _patient_hla_loh_consensus(bundle: ReportBundle) -> tuple[list[dict[str, str
     elif single_retained:
         tools = sorted({"SpecHLA" if str(row["综合判断"]).startswith("仅SpecHLA") else "LOHHLA" for row in single_retained})
         other_qc = any("QC不足" in str(row.get("LOHHLA") or "") or "QC不足" in str(row.get("SpecHLA") or "") for row in single_retained)
-        unavailable = "另一工具因QC不足未形成有效判断" if other_qc else "另一工具未形成有效判断"
+        unavailable = "另一工具因QC或输入对接不足未形成有效判断" if other_qc else "另一工具未形成有效判断"
         overall = (
             f"{'/'.join(tools)}未提示相应限制性HLA-I等位基因LOH；{unavailable}，"
             "因此当前仅有单工具支持，不足以确认该等位基因在肿瘤中完整保留。"
@@ -5048,7 +5541,16 @@ def _patient_release_metadata(bundle: ReportBundle) -> dict[str, str]:
     run_id = str(bundle.provenance.get("run_id") or bundle.provenance.get("analysis_id") or "")
     if not run_id and input_hash:
         run_id = f"{bundle.sample_id or 'sample'}-{input_hash[:12]}"
-    return {"run_id": run_id or "未记录", "rules_version": rules_version, "input_sha256": input_hash or "未记录"}
+    contract = bundle.provenance.get("cohort_rule_contract") or {}
+    return {
+        "run_id": run_id or "未记录",
+        "rules_version": rules_version,
+        "input_sha256": input_hash or "未记录",
+        "cohort_rule_set": str(contract.get("id") or "未记录"),
+        "cohort_rule_version": str(contract.get("version") or "未记录"),
+        "report_contract_version": str(contract.get("report_contract_version") or "未记录"),
+        "cohort_comparability": str(contract.get("comparability_status") or "未评估"),
+    }
 
 
 def _patient_release_audit(
@@ -5107,6 +5609,12 @@ def _patient_release_audit(
         ("8", "记录run_id、规则版本和输入hash", all(metadata[key] != "未记录" for key in metadata), f"run_id={metadata['run_id']}；规则={metadata['rules_version']}；hash={metadata['input_sha256'][:16]}..."),
         ("9", "Top候选来源冲突均已解决或解释", not unexplained_conflicts, f"有冲突 {len(conflicting)} 条；未解释 {len(unexplained_conflicts)} 条"),
         ("10", "患者版不含服务器路径或工具日志", not path_or_log, "已扫描绝对路径和常见日志标记"),
+        (
+            "11",
+            "队列规则合同已锁定且可横比",
+            metadata["cohort_comparability"] == "LOCKED_COMPARABLE",
+            f"规则集={metadata['cohort_rule_set']}；版本={metadata['cohort_rule_version']}；报告合同={metadata['report_contract_version']}；状态={metadata['cohort_comparability']}",
+        ),
     ]
     rows = [{"编号": number, "审计项": label, "状态": "通过" if passed else "失败", "说明": detail} for number, label, passed, detail in checks]
     overall = "PASS" if all(passed for _, _, passed, _ in checks) else "DRAFT_NOT_FOR_RELEASE"
@@ -5133,8 +5641,7 @@ def make_patient_report(
         row for _, row in sorted(
             enumerate(all_representatives),
             key=lambda item: (
-                0 if _disease_anchor(item[1], bundle) else 1,
-                1 if _patient_fusion_artifact_review(item[1]) else 0,
+                _patient_fusion_narrative_sort_key(item[1], bundle),
                 item[0],
             ),
         )
@@ -5232,6 +5739,8 @@ def make_patient_report(
         {"项目": "运行标识", "结果": release_metadata["run_id"], "说明": "用于报告与输入证据追溯"},
         {"项目": "规则版本", "结果": release_metadata["rules_version"], "说明": "本次事件分级和候选分流规则"},
         {"项目": "输入证据哈希", "结果": release_metadata["input_sha256"], "说明": "全部工具证据表SHA256"},
+        {"项目": "队列规则集", "结果": release_metadata["cohort_rule_set"], "说明": "同一队列必须使用相同规则集、版本和文件哈希"},
+        {"项目": "队列可比性", "结果": release_metadata["cohort_comparability"], "说明": "仅LOCKED_COMPARABLE可用于正式队列横比"},
     ])
     out.append(_table(summary, ["项目", "结果", "说明"]))
     screening_rows = [
@@ -5328,11 +5837,22 @@ def make_patient_report(
         out.append("<div class='warn'><b>患者数据清单未提供：</b>请通过 --patient-inputs 或 provenance.json 的 input_files 字段提供文件目录或文件名。</div>")
     out.append("<p class='small'>以下评估来自结构化运行清单和工具结果；‘未评估’表示证据缺失，不表示正常。</p>")
     out.append(_table(_patient_qc_rows(bundle), ["项目", "结果", "解释"]))
+    coding_rna_rows = _patient_coding_variant_rna_rows(bundle)
+    if coding_rna_rows:
+        out.append("<h3>编码变异的DNA–RNA证据覆盖</h3>")
+        out.append(
+            "<p class='small'>本表只统计由DNA VCF检出的SNV/InDel，并按独立事件去重；"
+            "不混入Fusion/Splice，也不把增加融合caller当作编码变异RNA补证。RNA无覆盖和低覆盖表示检出能力不足；"
+            "充分覆盖且ALT=0表示突变等位基因RNA表达未获得支持，属于更明确的负证据。RNA ALT 1–2为低水平支持，ALT≥3为直接支持。</p>"
+        )
+        out.append(_table(coding_rna_rows, [
+            "编码变异赛道", "DNA检出事件", "RNA ALT≥3", "RNA ALT 1–2", "RNA无覆盖",
+            "RNA低覆盖且ALT=0", "RNA充分覆盖且ALT=0", "位点RNA未计算", "DNA有、RNA无直接支持",
+        ]))
     out.append("<p class='small'>以下并列展示各纯度工具的估算。共识值用于CNV和LOH解释；明显冲突时保留全部结果及低置信度说明，不静默选择FACETS。</p>")
     out.append(_table(_patient_purity_rows(bundle), ["工具/模式", "纯度", "倍性", "QC/状态", "交叉验证说明"]))
     out.append(
-        "<div class='warn'><b>克隆性证据边界：</b>"
-        "多数候选目前尚不能可靠判断其是否存在于大部分肿瘤细胞中，因此克隆性仍是主要证据缺口之一。</div>"
+        f"<div class='warn'><b>克隆性证据边界：</b>{esc(_patient_clonality_boundary(bundle))}</div>"
     )
     out.append("</div>")
 
@@ -5358,9 +5878,30 @@ def make_patient_report(
     )
     out.append("<p>这些结果说明候选是否具备被加工和呈递的条件，但不能单独判断免疫治疗敏感、耐药或患者获益。</p></div>")
 
+    experiment_gate_rows = _patient_experiment_entry_gate_rows(bundle)
+    if experiment_gate_rows:
+        out.append("<div class='section'><h2>首批实验入口门控</h2>")
+        out.append(
+            "<p>事件真实存在不等于相应肽段已经适合进入首批实验。候选还必须经过核心呈递共识、"
+            "HLA/APPM、自身相似性与正常组织风险筛查；融合候选还需按精确断点核对正常融合或read-through背景。"
+            "下表中的“支持进入”仅表示该证据层通过计算门控，不表示候选已被确认可注射、有效或安全。</p>"
+        )
+        out.append(_table(experiment_gate_rows, [
+            "实验入口门控", "适用Peptide–HLA", "支持进入", "谨慎/封顶", "明确阻断", "未评估", "对候选的影响",
+        ]))
+        out.append("</div>")
+
     out.append("<div class='section'><h2>4. 重点变异事件（按类型、按事件去重）</h2>")
     overall = [{"事件类型": track, "事件数": count, "主要复核重点": {"SNV": "DNA深度/VAF、RNA alt、MT/WT", "InDel": "局部重比对、阅读框、NMD和phasing", "Fusion": "精确断点、junction reads、frame和正常read-through", "Splice": "精确junction、PSI/reads、正常isoform和ORF", "DNA SV": "断点与异常转录本"}.get(track, "事件真实性和证据完整性")} for track, count in sorted(track_counts.items())]
     out.append(_table(overall, ["事件类型", "事件数", "主要复核重点"]))
+    fusion_narrative_rows = _patient_fusion_narrative_rows(bundle)
+    if fusion_narrative_rows:
+        out.append("<h3>Fusion疾病机制与组织背景分层</h3>")
+        out.append(
+            "<p class='small'>融合总检出数包含疾病锚定、普通候选以及组织背景/伪影复核事件。"
+            "为避免高表达组织背景抬高治疗叙事中的“融合负担”，三层分别计数；背景复核层仍保留在技术结果中，但不与疾病驱动融合并列解释。</p>"
+        )
+        out.append(_table(fusion_narrative_rows, ["融合叙事分层", "独立融合事件", "报告中的解释", "代表性依据"]))
     splice_funnel_rows = _patient_splice_funnel_rows(bundle)
     if splice_funnel_rows:
         out.append("<h3>异常剪接逐级筛选漏斗</h3>")
@@ -5384,8 +5925,7 @@ def make_patient_report(
             row for _, row in sorted(
                 enumerate(representatives),
                 key=lambda item: (
-                    0 if _disease_anchor(item[1], bundle) else 1,
-                    1 if _patient_fusion_artifact_review(item[1]) else 0,
+                    _patient_fusion_narrative_sort_key(item[1], bundle),
                     item[0],
                 ),
             )
@@ -5396,7 +5936,7 @@ def make_patient_report(
             peptide = str(row.get("peptide") or "").strip()
             hla = str(row.get("hla_allele") or "").strip()
             peptide_hla = f"{peptide} / {hla}" if peptide and hla else "尚未形成完整Peptide-HLA组合"
-            rows.append({
+            display_row = {
                 "排名": rank,
                 "基因/事件": row.get("gene") or row.get("event_name") or row.get("event_id", ""),
                 "改变": _patient_event_change(row),
@@ -5405,13 +5945,22 @@ def make_patient_report(
                 "关键证据与下一步": _patient_event_evidence_and_next_step(
                     row, bundle, val_map, compact_common=True,
                 ),
-            })
+            }
+            if track == "Fusion":
+                _, narrative_label, narrative_reason = _patient_fusion_narrative_tier(row, bundle)
+                display_row["融合叙事分层"] = narrative_label
+                display_row["关键证据与下一步"] = narrative_reason + "；" + str(display_row["关键证据与下一步"])
+            rows.append(display_row)
         out.append(f"<h3>{esc(track)} Top {event_top_n}</h3>")
         out.append(
             f"<p class='small'><b>本赛道证据口径：</b>{esc(_patient_track_evidence_note(track))}"
             "下表仅展示候选间存在差异的实测证据和特异性缺口，不再逐行重复不适用项。</p>"
         )
-        out.append(_table(rows, ["排名", "基因/事件", "改变", "肽段-HLA", "R等级", "关键证据与下一步"]))
+        headers = ["排名", "基因/事件", "改变", "肽段-HLA", "R等级"]
+        if track == "Fusion":
+            headers.append("融合叙事分层")
+        headers.append("关键证据与下一步")
+        out.append(_table(rows, headers))
     out.append(f"<p class='small'>不同事件赛道的证据结构不同，Top {event_top_n}用于赛道内审阅，不应仅凭序号直接跨赛道比较。</p></div>")
 
     manual_review_rows = _patient_manual_review_rows(bundle.events, ranked, bundle, val_map)

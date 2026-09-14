@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from neoag.reports_dual import ReportBundle, _apply_patient_gene_expression, _augment_runtime_tool_provenance, _find_bam_input, _patient_analysis_context, _patient_conflict_summary, _patient_disease_background, _patient_dna_evidence, _patient_dna_rna_interpretation, _patient_event_grade_counts, _patient_event_representatives, _patient_evidence_audit_rows, _patient_evidence_summary, _patient_event_change, _patient_expression_tpm_map, _patient_fusion_artifact_review, _patient_fusion_boundary_evidence, _patient_hla_loh_consensus, _patient_key_gaps, _patient_limitation, _patient_manual_review_rows, _patient_metric, _patient_presentation_metric, _patient_presentation_quantitative_row, _patient_rna_measurements, _patient_rna_metric, _patient_safety_dimensions, _patient_safety_gap, _patient_tool_rows, _patient_track, _patient_validation, _replace_gene_ids, load_report_bundle, make_dual_reports, make_patient_report, make_technical_report
-from neoag.reports_dual import _patient_ccf_coverage_rows, _patient_splice_funnel_rows
+from neoag.reports_dual import _patient_ccf_coverage_rows, _patient_clonality_boundary, _patient_coding_variant_rna_rows, _patient_experiment_entry_gate_rows, _patient_fusion_narrative_rows, _patient_fusion_narrative_tier, _patient_splice_funnel_rows
 from neoag.utils import write_tsv
 
 
@@ -85,6 +85,7 @@ def test_patient_report_is_plain_language(tmp_path):
     assert "附录B：术语说明" in text
     assert "附件与可追溯文件" in text
     assert "缺失证据统一视为未评估" in text
+    assert "异常剪接逐级筛选漏斗" not in text
     assert "DQA1/DQB1" not in text
     assert "EWSR1::WT1" not in text
 
@@ -114,6 +115,17 @@ def test_splice_funnel_and_ccf_coverage_are_event_level_and_explicit():
     ccf = {row["事件类型"]: row for row in _patient_ccf_coverage_rows(bundle)}
     assert ccf["Splice"]["RNA-only不适用"] == "1"
     assert ccf["SNV"]["缺失/未解析"] == "1"
+
+
+def test_stale_splice_funnel_is_hidden_without_splice_results():
+    bundle = _bundle()
+    bundle.provenance["splice_filter_funnel_rows"] = [{
+        "stage": "UNIQUE_JUNCTION_READS",
+        "entered_events": "10",
+        "assessed_events": "10",
+        "passed_events": "8",
+    }]
+    assert _patient_splice_funnel_rows(bundle) == []
 
 
 def test_splice_rna_measurements_do_not_substitute_tpm_for_psi_or_unique_reads():
@@ -1115,8 +1127,8 @@ def test_patient_report_writes_machine_readable_release_audit(tmp_path):
     audit = out.with_suffix(".release_audit.json")
     assert audit.is_file()
     payload = json.loads(audit.read_text(encoding="utf-8"))
-    assert len(payload["checks"]) == 10
-    assert {row["编号"] for row in payload["checks"]} == {str(i) for i in range(1, 11)}
+    assert len(payload["checks"]) == 11
+    assert {row["编号"] for row in payload["checks"]} == {str(i) for i in range(1, 12)}
 
 
 def test_patient_limitation_keeps_hard_fail_and_missing_dimensions():
@@ -1418,11 +1430,198 @@ def test_patient_report_uses_single_sample_level_clonality_boundary(tmp_path):
     out = tmp_path / "patient_clonality_boundary.html"
     make_patient_report(out, bundle)
     text = out.read_text(encoding="utf-8")
-    boundary = "多数候选目前尚不能可靠判断其是否存在于大部分肿瘤细胞中，因此克隆性仍是主要证据缺口之一。"
-    assert text.count(boundary) == 1
+    assert text.count("<b>克隆性证据边界：</b>") == 1
+    assert "当前缺口是事件级CCF覆盖不足，而不是缺少样本纯度估计" not in text
     assert "CCF覆盖度与缺失影响" not in text
     assert "CCF=0.82" not in text
     assert "95%区间 0.61-0.97" not in text
+
+
+def test_patient_clonality_boundary_separates_low_purity_from_missing_ccf():
+    bundle = _bundle()
+    bundle.purity_consensus = {
+        "recommended_purity": "0.12", "recommended_ploidy": "2.1",
+        "status": "LOW_PURITY_REVIEW",
+    }
+    bundle.events = [{"event_id": "E1", "event_type": "SNV", "ccf_status": "UNASSESSED"}]
+    text = _patient_clonality_boundary(bundle)
+    assert "低纯度审阅" in text
+    assert "系统性降低CCF置信度" in text
+    assert "不解释为候选不存在" in text
+
+
+def test_patient_clonality_boundary_high_purity_names_event_level_gap():
+    bundle = _bundle()
+    bundle.purity_consensus = {
+        "recommended_purity": "0.92", "recommended_ploidy": "2.0",
+        "status": "CONCORDANT",
+    }
+    bundle.purity_tools = [
+        {"tool": "FACETS", "purity": "0.91", "status": "FOUND"},
+        {"tool": "PURPLE", "purity": "0.93", "status": "FOUND"},
+        {"tool": "Sequenza", "purity": "", "status": "MISSING"},
+        {"tool": "ASCAT", "purity": "", "status": "MISSING"},
+    ]
+    bundle.events = [{"event_id": "E1", "event_type": "SNV", "ccf_status": "UNASSESSED"}]
+    text = _patient_clonality_boundary(bundle)
+    assert "多工具一致或相互支持" in text
+    assert "事件级CCF覆盖不足，而不是缺少样本纯度估计" in text
+
+
+def test_patient_clonality_boundary_preserves_outlier_context():
+    bundle = _bundle()
+    bundle.purity_consensus = {
+        "recommended_purity": "0.48", "recommended_ploidy": "2.4",
+        "status": "MULTI_TOOL_REVIEW",
+    }
+    bundle.purity_tools = [
+        {"tool": "FACETS", "purity": "0.47", "status": "FOUND"},
+        {"tool": "Sequenza", "purity": "0.49", "status": "FOUND"},
+        {"tool": "PURPLE", "purity": "0.81", "status": "OUTLIER_EXCLUDED", "note": "excluded outlier"},
+    ]
+    bundle.events = [{"event_id": "E1", "event_type": "SNV", "ccf_status": "UNASSESSED"}]
+    text = _patient_clonality_boundary(bundle)
+    assert "PURPLE" in text
+    assert "冲突、离群或被排除" in text
+    assert "并列保留全部工具结果" in text
+
+
+def test_coding_variant_rna_coverage_is_event_level_and_excludes_junction_tracks():
+    bundle = _bundle()
+    bundle.events = [
+        {"event_id": "S1", "event_type": "SNV", "rna_depth": "0", "rna_alt_reads": "0"},
+        {"event_id": "S2", "event_type": "SNV", "rna_depth": "5", "rna_alt_reads": "0"},
+        {"event_id": "S3", "event_type": "SNV", "rna_depth": "120", "rna_alt_reads": "0"},
+        {"event_id": "S4", "event_type": "SNV", "rna_depth": "30", "rna_alt_reads": "4"},
+        {"event_id": "I1", "event_type": "InDel"},
+        {"event_id": "F1", "event_type": "Fusion", "rna_junction_reads": "100"},
+    ]
+    bundle.peptides = [
+        {"event_id": "S4", "event_type": "SNV", "rna_depth": "30", "rna_alt_reads": "4"},
+    ]
+    rows = _patient_coding_variant_rna_rows(bundle)
+    by_track = {row["编码变异赛道"]: row for row in rows}
+    assert by_track["SNV"]["DNA检出事件"] == "4"
+    assert by_track["SNV"]["RNA ALT≥3"] == "1"
+    assert by_track["SNV"]["RNA无覆盖"] == "1"
+    assert by_track["SNV"]["RNA低覆盖且ALT=0"] == "1"
+    assert by_track["SNV"]["RNA充分覆盖且ALT=0"] == "1"
+    assert by_track["InDel"]["位点RNA未计算"] == "1"
+    assert by_track["SNV+InDel合计"]["DNA检出事件"] == "5"
+    assert all("Fusion" not in row["编码变异赛道"] for row in rows)
+
+
+def test_patient_report_explains_coding_variant_rna_gap_without_fusion_callers(tmp_path):
+    bundle = _bundle()
+    bundle.events = [
+        {"event_id": "S1", "event_type": "SNV", "rna_depth": "100", "rna_alt_reads": "0"},
+        {"event_id": "I1", "event_type": "InDel"},
+    ]
+    out = tmp_path / "coding_rna_gap.html"
+    make_patient_report(out, bundle)
+    text = out.read_text(encoding="utf-8")
+    assert "编码变异的DNA–RNA证据覆盖" in text
+    assert "不混入Fusion/Splice" in text
+    assert "不把增加融合caller当作编码变异RNA补证" in text
+    assert "DNA有、RNA无直接支持" in text
+
+
+def test_experiment_entry_gates_separate_presentation_caps_and_safety_hard_failures():
+    bundle = _bundle()
+    bundle.appm_summary = {"appm_evidence_completeness": "LOW"}
+    bundle.peptides = [
+        {
+            "event_id": "E1", "peptide": "AAAAAAAAA", "hla_allele": "HLA-A*02:01", "event_type": "SNV",
+            "presentation_consensus_state": "PRESENTATION_DISCORDANT", "safety_state": "SAFETY_PARTIAL",
+            "normal_proteome_exact_match_status": "NOT_DETECTED",
+        },
+        {
+            "event_id": "E2", "peptide": "BBBBBBBBB", "hla_allele": "HLA-A*02:01", "event_type": "Fusion",
+            "presentation_consensus_state": "PRESENTATION_CONSISTENT_STRONG", "safety_state": "SAFETY_REJECT",
+            "reference_proteome_exact_match": "true", "hard_failure_codes": "HARD_REFERENCE_PROTEOME_MATCH",
+            "normal_junction_assessment_status": "UNASSESSED",
+        },
+    ]
+    rows = {row["实验入口门控"]: row for row in _patient_experiment_entry_gate_rows(bundle)}
+    assert rows["NetMHCpan/MHCflurry核心呈递共识"]["谨慎/封顶"] == "1"
+    assert rows["NetMHCpan/MHCflurry核心呈递共识"]["支持进入"] == "1"
+    assert rows["正常蛋白组精确匹配"]["明确阻断"] == "1"
+    assert rows["HLA/APPM证据完整度"]["谨慎/封顶"] == "2"
+    assert rows["Fusion精确断点级正常背景"]["未评估"] == "1"
+
+
+def test_patient_report_states_event_truth_does_not_equal_first_batch_candidate(tmp_path):
+    bundle = _bundle()
+    bundle.peptides[0].update({
+        "presentation_consensus_state": "PRESENTATION_DISCORDANT",
+        "normal_proteome_exact_match_status": "NOT_DETECTED",
+        "safety_state": "SAFETY_PARTIAL",
+    })
+    out = tmp_path / "experiment_entry_gate.html"
+    make_patient_report(out, bundle)
+    text = out.read_text(encoding="utf-8")
+    assert "首批实验入口门控" in text
+    assert "事件真实存在不等于相应肽段已经适合进入首批实验" in text
+    assert "不表示候选已被确认可注射、有效或安全" in text
+    assert "NetMHCpan/MHCflurry核心呈递共识" in text
+
+
+def test_fusion_narrative_separates_disease_anchor_from_high_normal_tissue_background():
+    bundle = _bundle()
+    bundle.disease_knowledge = {
+        "status": "LOADED",
+        "anchors": [{"event": "EWSR1::WT1", "molecular_significance": "DSRCT关键机制事件"}],
+    }
+    anchor = {"event_id": "F1", "event_type": "Fusion", "gene": "EWSR1::WT1"}
+    background = {
+        "event_id": "F2", "event_type": "Fusion", "gene": "ALB::GENE2",
+        "normal_tissue_max_tpm": "520", "normal_tissue_max_tissue": "Liver",
+    }
+    ordinary = {"event_id": "F3", "event_type": "Fusion", "gene": "GENE3::GENE4"}
+    assert _patient_fusion_narrative_tier(anchor, bundle)[0] == "DISEASE_ANCHOR"
+    assert _patient_fusion_narrative_tier(background, bundle)[0] == "BACKGROUND_REVIEW"
+    assert _patient_fusion_narrative_tier(ordinary, bundle)[0] == "ORDINARY_CANDIDATE"
+    bundle.events = [anchor, background, ordinary]
+    bundle.peptides = []
+    rows = {row["融合叙事分层"]: row for row in _patient_fusion_narrative_rows(bundle)}
+    assert rows["疾病锚定融合"]["独立融合事件"] == "1"
+    assert rows["普通融合候选"]["独立融合事件"] == "1"
+    assert rows["组织背景/伪影复核"]["独立融合事件"] == "1"
+
+
+def test_patient_fusion_top_places_background_after_anchor_and_ordinary(tmp_path):
+    bundle = _bundle()
+    bundle.disease_knowledge = {
+        "status": "LOADED",
+        "anchors": [{"event": "EWSR1::WT1", "molecular_significance": "DSRCT关键机制事件"}],
+    }
+    bundle.events = [
+        {"event_id": "F2", "event_type": "Fusion", "gene": "ALB::GENE2", "normal_tissue_max_tpm": "520", "normal_tissue_max_tissue": "Liver", "best_evidence_grade": "R3"},
+        {"event_id": "F3", "event_type": "Fusion", "gene": "GENE3::GENE4", "best_evidence_grade": "R3"},
+        {"event_id": "F1", "event_type": "Fusion", "gene": "EWSR1::WT1", "best_evidence_grade": "R3"},
+    ]
+    bundle.peptides = [
+        {"event_id": row["event_id"], "event_type": "Fusion", "gene": row["gene"], "peptide": "AAAAAAAAA", "hla_allele": "HLA-A*02:01", "source_chain_confidence_tier": "C2"}
+        for row in bundle.events
+    ]
+    out = tmp_path / "fusion_narrative.html"
+    make_patient_report(out, bundle, event_top_n=3)
+    text = out.read_text(encoding="utf-8")
+    section = text.split("<h3>Fusion Top 3</h3>", 1)[1].split("</table>", 1)[0]
+    assert section.index("EWSR1::WT1") < section.index("GENE3::GENE4") < section.index("ALB::GENE2")
+    assert "融合叙事分层" in section
+    assert "不与疾病驱动融合并列解释" in text
+
+
+def test_lohhla_qc_gap_is_not_attributed_to_missing_purity_tools():
+    bundle = _bundle()
+    bundle.hla_loh_tool_results = [
+        {"hla_allele": "HLA-A*02:01", "source_tool": "SpecHLA", "status": "RETAINED", "spechla_copy": "2"},
+        {"hla_allele": "HLA-A*02:01", "source_tool": "LOHHLA", "status": "UNASSESSED", "lohhla_pval": "NA"},
+    ]
+    rows, _ = _patient_hla_loh_consensus(bundle)
+    assert "CopyNumLoc/纯度倍性参数" in rows[0]["说明"]
+    assert "不应归因于Sequenza或ASCAT未运行" in rows[0]["说明"]
 
 
 def test_patient_evidence_audit_counts_later_tool_field_after_unassessed_placeholder():
@@ -1714,6 +1913,26 @@ def test_scoring_all_tool_results_counts_as_canonical(tmp_path):
     assert bundle.evidence_integrity["status"] == "PASS"
 
 
+def test_dotted_hla_loh_sidecars_are_loaded_for_both_tools(tmp_path):
+    loh_dir = tmp_path / "hla_loh_consensus"
+    loh_dir.mkdir()
+    write_tsv(loh_dir / "lohhla.hla_loh.tsv", [
+        {"hla_allele": "HLA-A*02:01", "loh_status": "loh", "evidence_tool": "lohhla"},
+    ])
+    write_tsv(loh_dir / "spechla.hla_loh.tsv", [
+        {"hla_allele": "HLA-A*02:01", "loh_status": "no", "evidence_tool": "spechla"},
+    ])
+    base = _bundle()
+    base.peptides[0]["hla_allele"] = "HLA-A*02:01"
+    bundle = load_report_bundle(
+        profile=base.profile, events=base.events, peptides=base.peptides, outdir=tmp_path,
+    )
+    assert {row.get("_report_tool") for row in bundle.hla_loh_tool_results} == {"LOHHLA", "SpecHLA"}
+    rows, overall = _patient_hla_loh_consensus(bundle)
+    assert rows[0]["综合判断"] == "工具结果冲突，暂不判定"
+    assert "HLA-I LOH工具结果冲突" in overall
+
+
 def test_hla_loh_consensus_tsv_is_expanded_into_tool_rows(tmp_path):
     consensus_dir = tmp_path / "hla_loh_consensus"
     consensus_dir.mkdir()
@@ -1915,7 +2134,7 @@ def test_hla_loh_qc_only_record_does_not_count_as_assessed_tool():
     ]
     rows, overall = _patient_hla_loh_consensus(bundle)
     assert overall == (
-        "SpecHLA未提示相应限制性HLA-I等位基因LOH；另一工具因QC不足未形成有效判断，"
+        "SpecHLA未提示相应限制性HLA-I等位基因LOH；另一工具因QC或输入对接不足未形成有效判断，"
         "因此当前仅有单工具支持，不足以确认该等位基因在肿瘤中完整保留。"
     )
     assert "多工具一致" not in overall
@@ -1949,6 +2168,23 @@ def test_depth_and_rna_qc_are_summarized_by_unique_event():
     assert "n=2" in bundle.provenance["tumor_dna_depth"]
     assert "SNV/InDel位点级RNA已评估 2/2 个独立事件" in bundle.provenance["rna_qc_status"]
     assert "ALT reads≥1/3/5：1/1/0" in bundle.provenance["rna_qc_status"]
+
+
+def test_rna_qc_denominator_keeps_dna_events_without_rna_metrics():
+    base = _bundle()
+    assessed = dict(base.peptides[0])
+    missing = dict(base.peptides[0])
+    missing.update({"peptide_id": "P2", "event_id": "E2"})
+    for field in ("rna_depth", "rna_alt_reads", "rna_vaf"):
+        missing.pop(field, None)
+    bundle = load_report_bundle(
+        profile=base.profile,
+        events=[],
+        peptides=[assessed, missing],
+        provenance={"rna_qc_status": "位点级RNA pileup未评估"},
+    )
+    assert "SNV/InDel位点级RNA已评估 1/2 个独立事件" in bundle.provenance["rna_qc_status"]
+    assert "位点RNA未计算：1" in bundle.provenance["rna_qc_status"]
 
 
 def test_disease_knowledge_prioritizes_display_without_changing_r_grade(tmp_path):

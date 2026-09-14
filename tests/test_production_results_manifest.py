@@ -7,7 +7,7 @@ import tomllib
 from pathlib import Path
 
 from neoag.utils import read_tsv
-from neoag.production_runner import _materialize_reusable_immunogenicity_outputs
+from neoag.production_runner import _materialize_reusable_immunogenicity_outputs, _outputs_ready
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +25,25 @@ def make_star_index(path: Path) -> Path:
         write(path / name, "fixture\n")
     write(path / "genomeParameters.txt", "versionGenome 2.7.11b\nsjdbOverhang 149\n")
     return path
+
+
+def test_outputs_ready_rejects_existing_table_with_blank_required_fields(tmp_path):
+    purity = write(
+        tmp_path / "recommended_purity.tsv",
+        "sample_id\tpurity\tploidy\nS1\t\t\n",
+    )
+    outputs = {"purity": str(purity)}
+    assert not _outputs_ready(
+        outputs,
+        data_row_outputs=["purity"],
+        required_output_fields=["purity:purity", "purity:ploidy"],
+    )
+    purity.write_text("sample_id\tpurity\tploidy\nS1\t0.61\t2.0\n", encoding="utf-8")
+    assert _outputs_ready(
+        outputs,
+        data_row_outputs=["purity"],
+        required_output_fields=["purity:purity", "purity:ploidy"],
+    )
 
 
 def test_generator_builds_all_three_upstream_consensus_stages(tmp_path):
@@ -117,6 +136,50 @@ def test_generator_filters_splice_candidates_before_production_scoring(tmp_path)
     splice = manifest["stages"]["splice_candidates"]
     assert "filter_splice_production_candidates.py" in splice["command"]
     assert splice["outputs"]["raw_peptides"].endswith("production_selected/raw_peptides.tsv")
+
+
+def test_generator_enriches_splice_qc_from_star_and_rna_bam(tmp_path):
+    hla = write(tmp_path / "hla.txt", "HLA-A*02:01\n")
+    facets = write(tmp_path / "facets/facets_purity.txt", "purity\t0.60\n").parent
+    ascat = write(tmp_path / "ascat/ascat_summary.tsv", "sample_id\tpurity\tploidy\nS1\t0.64\t2.1\n").parent
+    lohhla = write(tmp_path / "lohhla/hla_loh.tsv", "hla_allele\tloh_status\nHLA-A*02:01\tretained\n")
+    spechla_loh = write(tmp_path / "spechla_loh/hla_loh.tsv", "hla_allele\tloh_status\nHLA-A*02:01\tretained\n")
+    star_sj = write(tmp_path / "star/SJ.out.tab", "chr1\t10\t20\t1\t1\t0\t12\t0\t25\n")
+    rna_bam = write(tmp_path / "star/Aligned.sortedByCoord.out.bam", "fixture\n")
+    write(Path(str(rna_bam) + ".bai"), "fixture\n")
+    rna_vaf = write(tmp_path / "rna_alt_vaf.tsv", "chrom\tpos\trna_depth\nchr1\t10\t20\n")
+    snaf = write(tmp_path / "snaf.tsv", "event_id\tpeptide\thla_allele\tbinding_rank\nE1\tACDEFGHIK\tHLA-A*02:01\t0.8\n")
+    normal = write(tmp_path / "normal_junctions.tsv", "junction_id\nchr1:10-20:+\n")
+    write(Path(str(normal) + ".sqlite"), "fixture\n")
+    output = tmp_path / "production.toml"
+    subprocess.run([
+        sys.executable, str(ROOT / "scripts/generate_production_from_results_manifest.py"),
+        "--project-root", str(ROOT), "--sample-id", "S1", "--outdir", str(tmp_path / "run"),
+        "--output", str(output), "--hla-file", str(hla), "--facets", str(facets),
+        "--ascat", str(ascat), "--lohhla", str(lohhla), "--spechla-loh", str(spechla_loh),
+        "--star-sj", str(star_sj), "--snaf", str(snaf), "--rna-bam", str(rna_bam),
+        "--rna-vaf", str(rna_vaf), "--normal-junctions", str(normal),
+    ], check=True)
+    manifest = tomllib.loads(output.read_text(encoding="utf-8"))
+    splice = manifest["stages"]["splice_candidates"]
+    assert "build_splice_junction_qc_from_star_bam.py" in splice["command"]
+    assert "--splice-consensus" in splice["command"]
+    assert "star_bam_qc/raw_events.enriched.tsv" in splice["command"]
+    assert splice["outputs"]["junction_read_qc"].endswith("splice_junction_qc.enriched.tsv")
+    assert "rna_bam_input" in splice["depends_on"]
+
+    output_without_normal = tmp_path / "production-without-normal.toml"
+    subprocess.run([
+        sys.executable, str(ROOT / "scripts/generate_production_from_results_manifest.py"),
+        "--project-root", str(ROOT), "--sample-id", "S1", "--outdir", str(tmp_path / "run-no-normal"),
+        "--output", str(output_without_normal), "--hla-file", str(hla), "--facets", str(facets),
+        "--ascat", str(ascat), "--lohhla", str(lohhla), "--spechla-loh", str(spechla_loh),
+        "--star-sj", str(star_sj), "--snaf", str(snaf), "--rna-bam", str(rna_bam),
+        "--rna-vaf", str(rna_vaf),
+    ], check=True)
+    command_without_normal = tomllib.loads(output_without_normal.read_text(encoding="utf-8"))["stages"]["splice_candidates"]["command"]
+    assert "build_splice_junction_qc_from_star_bam.py" in command_without_normal
+    assert "--normal-junction-sqlite" not in command_without_normal
 
 
 def test_generator_accepts_facets_and_ascat_when_other_purity_tools_failed(tmp_path):
@@ -306,6 +369,74 @@ def test_fusion_union_rescues_only_exact_diagnostic_whitelist_from_unfiltered_ea
     assert {row["fusion_gene"] for row in rescue} == {"EWSR1::WT1"}
 
 
+def test_easyfuse_audit_joins_source_by_event_id_not_filtered_row_order(tmp_path):
+    hla = write(tmp_path / "hla.txt", "HLA-A*02:01\n")
+    header = (
+        "BPID;Fusion_Gene;Breakpoint1;Breakpoint2;FTID;prediction_class;prediction_prob;"
+        "fusioncatcher_detected;star_detected;arriba_detected;fusioncatcher_junc;"
+        "fusioncatcher_span;fusioncatcher_anch;frame;type;neo_peptide_sequence;neo_peptide_sequence_bp"
+    )
+    easyfuse = write(
+        tmp_path / "fusions.pass.csv",
+        header + "\n"
+        "noise;NOISE_EVENT;10:10:+;14:20:-;noise_tx;negative;0.1;1;0;0;20;10;30;in_frame;trans;ACDEFGHIKLMNPQRST;8\n"
+        "ews;EWSR1_WT1;22:100:+;11:200:-;ews_tx;positive;0.9;1;1;0;20;10;30;in_frame;trans;ACDEFGHIKLMNPQRST;8\n",
+    )
+    outdir = tmp_path / "union-order"
+    subprocess.run([
+        sys.executable, str(ROOT / "scripts/build_fusion_caller_union.py"),
+        "--sample-id", "S1", "--hla-file", str(hla), "--easyfuse", str(easyfuse),
+        "--disable-diagnostic-fusion-rescue", "--no-targeted-fusion-rescue",
+        "--outdir", str(outdir),
+    ], cwd=ROOT, check=True)
+    events = read_tsv(outdir / "raw_events.tsv")
+    assert len(events) == 1
+    assert events[0]["gene"] == "EWSR1::WT1"
+    assert events[0]["breakpoint1"] == "22:100:+"
+    assert events[0]["breakpoint2"] == "11:200:-"
+    assert "10:10" not in events[0]["adjacency_key"]
+
+
+def test_confirmed_expressed_product_generates_closed_fusion_origin_chain(tmp_path):
+    hla = write(tmp_path / "hla.txt", "HLA-A*02:01\n")
+    header = (
+        "BPID;Fusion_Gene;Breakpoint1;Breakpoint2;FTID;prediction_class;prediction_prob;"
+        "fusioncatcher_detected;star_detected;arriba_detected;fusioncatcher_junc;"
+        "fusioncatcher_span;fusioncatcher_anch;frame;type;neo_peptide_sequence;neo_peptide_sequence_bp"
+    )
+    easyfuse = write(
+        tmp_path / "fusions.pass.csv",
+        header + "\n"
+        "ews;EWSR1_WT1;22:100:+;11:200:-;caller_tx;positive;0.9;1;1;1;20;10;30;in_frame;trans;ACDEFGHIKLMNPQRST;8\n",
+    )
+    junctions = write(
+        tmp_path / "Chimeric.out.junction",
+        "chr22\t100\t+\tchr11\t200\t-\t1\t0\t0\tread1\n"
+        "chr22\t100\t+\tchr11\t200\t-\t1\t0\t0\tread2\n"
+        "chr22\t100\t+\tchr11\t200\t-\t1\t0\t0\tread3\n",
+    )
+    products = write(
+        tmp_path / "expressed_products.tsv",
+        "genome_build\tchrom1\tpos1\tstrand1\tchrom2\tpos2\tstrand2\tgene1\tgene2\ttranscript1\ttranscript2\tprotein_sequence\twildtype_protein_sequence\tjunction_aa_position\tin_frame\torf_status\tnmd_status\tsource_tool\tsource_record_id\n"
+        "GRCh38\t22\t100\t+\t11\t200\t-\tEWSR1\tWT1\tENST1\tENST2\tMACDEFGHIKLMNPQRSTVWY\t\t10\tyes\tCONFIRMED\tNOT_AT_RISK\tAGFusion\tAGF1\n",
+    )
+    outdir = tmp_path / "union-confirmed-product"
+    subprocess.run([
+        sys.executable, str(ROOT / "scripts/build_fusion_caller_union.py"),
+        "--sample-id", "S1", "--hla-file", str(hla), "--easyfuse", str(easyfuse),
+        "--star-chimeric", str(junctions), "--fusion-expressed-products", str(products),
+        "--disable-diagnostic-fusion-rescue", "--no-targeted-fusion-rescue",
+        "--outdir", str(outdir),
+    ], cwd=ROOT, check=True)
+    origin = read_tsv(outdir / "fusion_peptide_origin_chain.tsv")
+    closed = [row for row in origin if row["source_chain_status"] == "CLOSED_ORF_AND_EXACT_JUNCTION"]
+    assert closed
+    assert all(row["orf_id"] and "|" in row["fusion_junction_display"] for row in closed)
+    assert all(row["exact_verified_junction_reads"] == "3" for row in closed)
+    queue = read_tsv(outdir / "fusion_orf_completion_queue.tsv")
+    assert queue[0]["orf_completion_status"] == "ORF_SOURCE_CHAIN_COMPLETE"
+
+
 def test_generator_unions_existing_fusion_callers_including_jaffal(tmp_path):
     hla = write(tmp_path / "hla.txt", "HLA-A*02:01\n")
     purity = write(tmp_path / "purity.tsv", "sample_id\tpurity\tploidy\nS1\t0.60\t2.0\n")
@@ -346,7 +477,9 @@ def test_generator_unions_existing_fusion_callers_including_jaffal(tmp_path):
     events = read_tsv(union_dir / "raw_events.tsv")
     assert len(events) == 1
     assert events[0]["gene"] == "EWSR1::WT1"
-    assert events[0]["rna_junction_reads"] == "15"
+    assert events[0]["provided_rna_junction_reads"] == "15"
+    assert events[0]["rna_junction_reads"] == "0"
+    assert events[0]["junction_match_status"] == "NO_EXACT_JUNCTION_MATCH"
 
 
 def test_generator_passes_explicit_star_chimeric_for_fusion_read_backlink(tmp_path):
@@ -368,6 +501,38 @@ def test_generator_passes_explicit_star_chimeric_for_fusion_read_backlink(tmp_pa
     command = tomllib.loads(output.read_text(encoding="utf-8"))["stages"]["fusion_candidates"]["command"]
     assert "--star-chimeric" in command
     assert str(chimeric) in command
+
+
+def test_generator_adds_star_bam_splice_qc_before_prefilter(tmp_path):
+    hla = write(tmp_path / "hla.txt", "HLA-A*02:01\n")
+    purity = write(tmp_path / "purity.tsv", "sample_id\tpurity\tploidy\nS1\t0.60\t2.0\n")
+    cnv = write(tmp_path / "cnv.tsv", "chrom\tstart\tend\ttotal_cn\nchr1\t1\t1000\t2\n")
+    lohhla = write(tmp_path / "lohhla.tsv", "hla_allele\tloh_status\nHLA-A*02:01\tretained\n")
+    spechla_loh = write(tmp_path / "spechla_loh.tsv", "hla_allele\tloh_status\nHLA-A*02:01\tretained\n")
+    junctions = write(tmp_path / "junctions.tsv", "chrom\tstart\tend\tstrand\nchr1\t100\t200\t+\n")
+    snaf = write(tmp_path / "snaf.tsv", "uid\nchr1:100-200:+\n")
+    splicemutr = tmp_path / "splicemutr"
+    splicemutr.mkdir()
+    rna_bam = write(tmp_path / "rna.bam", "fixture\n")
+    star_sj = write(tmp_path / "SJ.out.tab", "1\t100\t200\t1\t0\t0\t5\t0\t20\n")
+    normal_sqlite = write(tmp_path / "normal.sqlite", "fixture\n")
+    output = tmp_path / "production.toml"
+
+    subprocess.run([
+        sys.executable, str(ROOT / "scripts/generate_production_from_results_manifest.py"),
+        "--project-root", str(ROOT), "--sample-id", "S1", "--outdir", str(tmp_path / "run"),
+        "--output", str(output), "--hla-file", str(hla), "--purity", str(purity), "--cnv", str(cnv),
+        "--lohhla", str(lohhla), "--spechla-loh", str(spechla_loh),
+        "--junctions", str(junctions), "--snaf", str(snaf), "--splicemutr", str(splicemutr),
+        "--splice-rna-bam", str(rna_bam), "--splice-star-sj", str(star_sj),
+        "--normal-junction-sqlite", str(normal_sqlite),
+    ], check=True)
+
+    command = tomllib.loads(output.read_text(encoding="utf-8"))["stages"]["splice_candidates"]["command"]
+    assert "build_splice_junction_qc_from_star_bam.py" in command
+    assert str(rna_bam) in command and str(star_sj) in command
+    assert str(normal_sqlite) in command
+    assert command.index("build_splice_junction_qc_from_star_bam.py") < command.index("filter_splice_production_candidates.py")
 
 
 def test_existing_upstream_results_produce_hla_purity_and_loh_consensus(tmp_path):

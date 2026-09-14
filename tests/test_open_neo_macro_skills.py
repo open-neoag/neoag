@@ -46,6 +46,7 @@ from neoag.open_neo.rna_fusion_splice_profile import (
     is_rna_fastq_profile_candidate,
 )
 from neoag.open_neo.tool_consensus import build_tool_consensus
+from neoag.open_neo.output_layout import materialize_output_view
 from neoag.production_runner import load_production_manifest, run_production
 from neoag.sample_identity.bam_matcher import parse_bam_matcher_short
 from neoag.skill_taxonomy.registry import SKILLS_BY_NAME
@@ -116,6 +117,13 @@ def test_environment_installers_pin_target_interpreters():
     skill = (root / ".agents/skills/open-neo-install-check/SKILL.md").read_text(encoding="utf-8")
     assert "resolved Conda environment prefix as authoritative" in skill
     assert "perl -MDBI" in skill
+    assert "${SNAF_ENV_PREFIX}/bin/python -m pip" in skill
+    assert "tensorflow==2.3.0" in skill
+    assert "protobuf==3.20.3" in skill
+    assert "--no-deps" in skill
+    assert "${NEOAG_SPLICEMUTR_ENV_PREFIX}/bin/python" in skill
+    assert "Do not use `conda run` or `conda activate` for SpliceMutr smoke" in skill
+    assert "BSgenome.Hsapiens.UCSC.hg38" in skill
 
 
 def test_public_asset_plan_is_offline_and_detects_marker(tmp_path: Path):
@@ -205,6 +213,39 @@ def test_run_state_requires_matching_output_signature_for_reuse(tmp_path: Path):
     decision = resume_step_decision(state, "ranking")
     assert decision["decision"] == "RUN"
     assert decision["reason"].startswith("OUTPUT_HASH_CHANGED:")
+
+
+def test_output_view_preserves_native_results_and_groups_deliverables(tmp_path: Path):
+    result_root = tmp_path / "result"
+    (result_root / "tools/easyfuse").mkdir(parents=True)
+    (result_root / "scoring").mkdir()
+    (result_root / "reports").mkdir()
+    (result_root / "tools/easyfuse/calls.tsv").write_text("call\n", encoding="utf-8")
+    ranked = result_root / "scoring/ranked_peptides.evidence_consensus.tsv"
+    ranked.write_text("peptide\n", encoding="utf-8")
+    report = result_root / "reports/patient_report.html"
+    report.write_text("<html></html>\n", encoding="utf-8")
+
+    outputs = materialize_output_view(
+        result_root,
+        artifacts={"consensus_peptides": str(ranked), "patient_report": str(report)},
+        producer="test",
+    )
+
+    view = Path(outputs["deliverables_dir"])
+    assert (view / "01_tools/tools").is_symlink()
+    assert (view / "04_ranking/scoring").is_symlink()
+    assert (view / "05_reports/reports").is_symlink()
+    assert (view / "04_ranking/consensus_peptides").is_symlink()
+    assert (view / "05_reports/patient_report").is_symlink()
+    assert ranked.read_text(encoding="utf-8") == "peptide\n"
+    assert "consensus_peptides" in Path(outputs["deliverables_index"]).read_text(encoding="utf-8")
+
+
+def test_production_wrapper_materializes_standard_deliverables_view():
+    wrapper = (Path.cwd() / "scripts/run_production_case.sh").read_text(encoding="utf-8")
+    assert "materialize_output_view" in wrapper
+    assert "OPEN_NEO_OUTPUT_ROOT=\"$OUTDIR/final\"" in wrapper
 
 
 def test_failure_codes_have_stable_cli_exit_mapping():
@@ -469,7 +510,10 @@ def test_install_tier_assessment_marks_inaccessible_reference_missing(tmp_path: 
     assert by_name["reference_fasta"]["status"] == "MISSING"
 
 
-def test_auto_config_discovers_tools_references_and_templates(tmp_path: Path):
+def test_auto_config_discovers_tools_references_and_templates(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setenv("NEOAG_CONDA_BASE", str(tmp_path / "missing-conda"))
+    monkeypatch.delenv("SNAF_BIN", raising=False)
     project = tmp_path / "project"
     tools_root = tmp_path / "tools"
     refs_root = tmp_path / "refs"
@@ -547,6 +591,33 @@ def test_auto_config_skips_inaccessible_paths_from_another_machine(tmp_path: Pat
     row = next(row for row in result.rows if row["component"] == "reference_fasta")
     assert row["status"] == "CONFIGURED"
     assert row["resolved_path"] == str(portable_fasta.resolve())
+
+
+def test_auto_config_discovers_spechla_db_from_upstream_or_legacy_layout(tmp_path: Path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    tools_root = tmp_path / "tools"
+    tools_root.mkdir()
+    refs_root = tmp_path / "refs"
+    canonical = refs_root / "data/hla/spechla/db"
+    canonical.mkdir(parents=True)
+    (canonical / "ref").mkdir()
+    (canonical / "ref" / "hla.ref.extend.fa").write_text(">hla\nACGT\n", encoding="utf-8")
+    monkeypatch.setenv("SPECHLA_DB", str(tmp_path / "missing" / "spechla_db"))
+    tools_manifest = tmp_path / "tools.json"
+    tools_manifest.write_text(json.dumps({"tools": {"spechla": {"executable": "SpecHLA"}}}), encoding="utf-8")
+    refs_manifest = tmp_path / "references.json"
+    refs_manifest.write_text(json.dumps({"genome_build": "GRCh38", "references": {
+        "spechla_db": {"path": str(tmp_path / "other-host" / "data/hla/spechla_db")},
+    }}), encoding="utf-8")
+    result = configure_machine(
+        project_root=project, tools_manifest=tools_manifest, reference_manifest=refs_manifest,
+        outdir=tmp_path / "configured", tools_root=tools_root, reference_root=refs_root,
+        licensed_root=tmp_path / "licensed",
+    )
+    row = next(row for row in result.rows if row["component"] == "spechla_db")
+    assert row["status"] == "CONFIGURED"
+    assert row["resolved_path"] == str(canonical.resolve())
 
 
 def test_auto_config_discovers_project_wrappers_conda_envs_and_portable_assets(tmp_path: Path):
@@ -1085,6 +1156,7 @@ def test_rna_fastq_profile_generator_emits_full_dag(tmp_path: Path):
     assert "--outdir {outdir}/rna/expression" in text
     assert "--outdir {outdir}/rna/rsem_expression" in text
     assert "normalize_rna_fusion_splice.py" in text
+    assert "build_splice_junction_qc_from_star_bam.py" in text
     assert (tmp_path / "rna_fusion_splice.hla.txt").is_file()
     parsed = load_production_manifest(result["manifest"])
     assert parsed["run"]["profile"] == "rna_fusion_splice_v1"
@@ -1094,12 +1166,37 @@ def test_rna_fastq_profile_generator_emits_full_dag(tmp_path: Path):
     assert "--hla-file" in fusion_command
     assert "--require-nonempty-peptides" in fusion_command
     assert parsed["stages"]["fusion_peptide_generation"]["data_row_outputs"] == ["raw_peptides"]
+    assert parsed["stages"]["splice_candidate_normalization"]["outputs"]["raw_peptides"].endswith(
+        "junction_qc/raw_peptides.enriched.tsv"
+    )
     planned = run_production(
         result["manifest"], project_root=Path.cwd(), outdir=tmp_path / "production-plan"
     )
     assert {stage.name for stage in planned.stages} >= {
         "rna_alignment", "easyfuse_discovery", "splice_candidate_normalization"
     }
+
+
+def test_rna_fastq_profile_enriches_splice_qc_from_star_and_bam(tmp_path: Path):
+    inputs = _rna_profile_inputs(tmp_path)
+    normal_junctions = tmp_path / "normal_junctions.tsv"
+    normal_junctions.write_text("junction_id\nchr1:10-20:+\n", encoding="utf-8")
+    inputs["normal_junctions"] = str(normal_junctions)
+
+    result = generate_rna_fusion_splice_manifest(
+        inputs,
+        tmp_path / "profile-with-splice-qc.toml",
+        project_root=Path.cwd(),
+        outdir=tmp_path / "run",
+    )
+    parsed = load_production_manifest(result["manifest"])
+    splice = parsed["stages"]["splice_candidate_normalization"]
+    assert "--star-sj {outdir}/rna/star/SJ.out.tab" in splice["command"]
+    assert "build_normal_junction_index.py" in splice["command"]
+    assert "build_splice_junction_qc_from_star_bam.py" in splice["command"]
+    assert splice["outputs"]["raw_events"].endswith("junction_qc/raw_events.enriched.tsv")
+    assert splice["outputs"]["raw_peptides"].endswith("junction_qc/raw_peptides.enriched.tsv")
+    assert splice["outputs"]["junction_read_qc"].endswith("splice_junction_qc.enriched.tsv")
 
 
 
@@ -1159,7 +1256,9 @@ def test_rna_fastq_profile_does_not_require_ctat_for_easyfuse_only(tmp_path: Pat
     assert "ctat_genome_lib" not in result["missing_required"]
 
 
-def test_rna_fastq_profile_uses_builtin_snaf_when_reference_is_configured(tmp_path: Path):
+def test_rna_fastq_profile_uses_builtin_snaf_when_reference_is_configured(
+    tmp_path: Path, monkeypatch,
+):
     inputs = _rna_profile_inputs(tmp_path)
     snaf_db = tmp_path / "snaf_db"
     (snaf_db / "controls").mkdir(parents=True, exist_ok=True)
@@ -1172,13 +1271,14 @@ def test_rna_fastq_profile_uses_builtin_snaf_when_reference_is_configured(tmp_pa
     ):
         (snaf_db / relative).write_bytes(b"fixture")
     inputs["snaf_db"] = str(snaf_db)
-    inputs["snaf_python"] = "/opt/snaf/bin/python"
+    monkeypatch.setenv("SNAF_PYTHON", "/opt/snaf/bin/python")
     inputs["altanalyze_image"] = "neoag-altanalyze:snaf"
     result = generate_rna_fusion_splice_manifest(
         inputs, tmp_path / "snaf-profile.toml", project_root=Path.cwd(), outdir=tmp_path / "run",
     )
     text = Path(result["manifest"]).read_text(encoding="utf-8")
     assert "run_snaf_pipeline.sh" in text
+    assert "SNAF_PYTHON=/opt/snaf/bin/python" in text
     assert str(snaf_db) in text
     assert "neoag-altanalyze:snaf" in text
 
@@ -1283,8 +1383,53 @@ def test_capability_planner_builds_dna_hla_purity_loh_and_ranking_dag(tmp_path: 
     assert "configs/ranking/sarcoma_evidence_consensus_v3_source_chain.toml" in text
     assert 'required_presentation_predictors = ["netmhcpan", "mhcflurry", "netmhcstabpan", "netchop"]' in text
     assert set(["facets", "sequenza", "purple", "lohhla", "spechla", "netmhcpan", "mhcflurry"]) <= set(plan.selected_tools)
+    manifest = load_production_manifest(plan.manifest)
+    assert manifest["run"]["required_tool_groups"]["purity_cnv"]["tools"] == ["facets", "sequenza", "purple"]
+    assert manifest["run"]["required_tool_groups"]["hla_loh"]["tools"] == ["lohhla", "spechla"]
+    assert manifest["run"]["required_tool_groups"]["hla_loh"]["min_successful"] == 1
     rows = list(csv.DictReader(Path(plan.outputs["capability_decisions"]).open(), delimiter="\t"))
     assert any(row["domain"] == "purity_cnv" and row["status"] == "SELECTED" for row in rows)
+
+
+def test_capability_planner_discovers_complete_vep_plugin_pair(tmp_path: Path, monkeypatch):
+    inputs, tools, refs = _automatic_plan_inputs(tmp_path)
+    tools_data = json.loads(tools.read_text(encoding="utf-8"))
+    tools_data["tools"]["vep"] = {"executable": "/bin/true"}
+    tools.write_text(json.dumps(tools_data), encoding="utf-8")
+    asset_root = tmp_path / "assets"
+    plugins = asset_root / "work/vep_plugins"
+    plugins.mkdir(parents=True)
+    for filename in ("Wildtype.pm", "Frameshift.pm"):
+        (plugins / filename).write_text("package fixture;\n", encoding="utf-8")
+    monkeypatch.setenv("OPEN_NEO_REFERENCE_ROOT", str(asset_root))
+
+    plan = build_automatic_production_plan(
+        inputs, tmp_path / "vep-plugins.toml", project_root=Path.cwd(),
+        outdir=tmp_path / "run", tools_manifest=tools, reference_manifest=refs,
+    )
+    command = load_production_manifest(plan.manifest)["stages"]["snv_indel_candidates"]["command"]
+    assert f"--vep-plugins {plugins}" in command
+    assert "--vep-plugins  --" not in command
+    assert "--vep-bin" in command
+
+
+def test_capability_planner_release_gate_uses_only_selected_optional_tools(tmp_path: Path):
+    inputs, tools, refs = _automatic_plan_inputs(tmp_path)
+    tools_data = json.loads(tools.read_text(encoding="utf-8"))
+    tools_data["tools"]["sequenza"]["executable"] = "/nonexistent/sequenza"
+    tools.write_text(json.dumps(tools_data), encoding="utf-8")
+
+    plan = build_automatic_production_plan(
+        inputs, tmp_path / "without-sequenza.toml", project_root=Path.cwd(),
+        outdir=tmp_path / "run", tools_manifest=tools, reference_manifest=refs,
+    )
+    manifest = load_production_manifest(plan.manifest)
+    purity_rule = manifest["run"]["required_tool_groups"]["purity_cnv"]
+    hla_loh_rule = manifest["run"]["required_tool_groups"]["hla_loh"]
+    assert purity_rule["tools"] == ["facets", "purple"]
+    assert purity_rule["min_successful"] == 2
+    assert hla_loh_rule["tools"] == ["lohhla", "spechla"]
+    assert hla_loh_rule["min_successful"] == 1
 
 
 def test_capability_planner_resolves_explicit_hmftools_environment(
@@ -1606,6 +1751,9 @@ def test_open_neo_review_is_event_level_and_non_mutating(tmp_path: Path):
     assert (outdir / "review/hla_loh_appm_review/appm_escape_review.md").is_file()
     assert (outdir / "review/ccf_clonality_review/ccf_clonality_review.md").is_file()
     assert (outdir / "reports/technical_report.md").is_file()
+    technical_html = (outdir / "reports/technical_report.html").read_text(encoding="utf-8")
+    assert "<table>" in technical_html
+    assert "<pre>" not in technical_html
     assert review_rows[0]["pipeline_r_grade"] == "R1"
     assert review_rows[0]["experiment_priority"] == "EXPERIMENT_PRIORITY_HIGH"
 
@@ -1730,3 +1878,16 @@ def test_macro_skills_run_through_skill_runner(tmp_path: Path):
     })
     assert result["status"] == "PASS"
     assert result["algorithm_owner"] == "src/neoag/evidence_consensus.py"
+
+
+def test_shared_predictor_roots_are_forwarded_and_discovered():
+    root = Path(__file__).resolve().parents[1]
+    production_script = (root / "scripts/run_production_case.sh").read_text(encoding="utf-8")
+    tools_env = (root / "conf/tools.env.sh").read_text(encoding="utf-8")
+
+    assert 'export NEOAG_ASSET_ROOT="$ASSET"' in production_script
+    assert 'export NEOAG_PREDICTOR_DEPS="$PRED_DEPS"' in production_script
+    assert '${NEOAG_PREDICTOR_DEPS}/bigmhc' in tools_env
+    assert '${NEOAG_PREDICTOR_DEPS}/DeepImmuno' in tools_env
+    assert '${NEOAG_ASSET_ROOT}/data/predictors/bigmhc' in tools_env
+    assert '${NEOAG_ASSET_ROOT}/data/predictors/DeepImmuno' in tools_env

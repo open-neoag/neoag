@@ -80,10 +80,8 @@ extension before running real data:
     paths. Default is dry-run; use `--execute` only with approval:
     `scripts/09_sync_production_assets.sh --old-host <user@host> --old-env-tool <path> --old-reference-root <path> --old-licensed-root <path> --tools-root <target-env_tool> --reference-root <target-reference-root> --licensed-root <target-licensed-root> --outdir <outdir> --execute`.
 11. When README-listed external tools should be installed or rebuilt on the
-    target machine, use the consolidated installer. It defaults to Miniforge3 at
-    `<target-env_tool>/miniforge3`, supports open conda/git tools by group, and
-    delegates licensed/local archives to `12_install_local_licensed_tools.sh`:
-    `scripts/13_install_readme_tools.sh --project-root <root> --tools-root <target-env_tool> --licensed-root <target-licensed-root> --reference-root <target-reference-root> --core-env --vep --gatk --immunogenicity --allow-download --execute`.
+    target machine, use the single new-machine entrypoint:
+    `scripts/16_install_new_machine.sh --project-root <root> --tools-root <target-env_tool> --licensed-root <target-licensed-root> --reference-root <target-reference-root> --standard --allow-download --execute`.
 12. When licensed tools are available as files or directories already visible
     on the target machine, install them into the target licensed-tool root without
     creating `/mnt`, `/home`, or old-machine symlinks:
@@ -99,8 +97,8 @@ dependency. Install it only when requested, with explicit download approval:
 `scripts/17_install_claude_code.sh --channel stable --allow-download --execute`.
 The installer uses Anthropic's official native installer, verifies
 `claude --version`, and never performs login or stores credentials. The same
-step is available through `13_install_readme_tools.sh --claude-code` and
-`16_install_new_machine.sh --claude-code`. Use `--claude-code-channel latest`
+step is available through `16_install_new_machine.sh --claude-code`. Use
+`--claude-code-channel latest`
 or an exact `X.Y.Z` version only when explicitly requested.
 
 Do not run `run-full`, `pipeline-full --execute`, or any patient workflow until
@@ -132,7 +130,7 @@ bash .agents/skills/neoag-remote-deploy/scripts/16_install_new_machine.sh \
   --execute
 ```
 
-For README-listed open/conda tools, prefer `13_install_readme_tools.sh` over
+For README-listed open/conda tools, prefer `16_install_new_machine.sh` over
 running many installer scripts manually. It defaults to Miniforge3 under
 `/opt/neoag/env_tool/miniforge3` or `<tools-root>/miniforge3`; use
 `--no-install-miniforge` only when a site-managed conda must be used instead.
@@ -147,7 +145,7 @@ when `--sync-assets` is used. Sequenza is installed as a conda env from
 `conda/env.neoag-sequenza.yml`. Sequenza and ASCAT use
 `with_bioc_data_cache.sh` to prefetch and verify GenomeInfoDbData in an isolated
 Conda package cache; temporary metadata changes are restored automatically.
-Splice helpers are installed from `conda/env.neoag-splice.yml`, with SNAF installed by default from its pinned Git revision in a Python 3.8 `neoag-snaf` compatibility environment (`--skip-snaf` opts out), and SpliceMutr installed from a pinned source snapshot in `neoag-splicemutr` (`--skip-splicemutr` opts out); SpecHLA, HLA-LA, and HMF PURPLE are registered
+Splice helpers are installed from `conda/env.neoag-splice.yml`, with SNAF installed by default from its pinned Git revision in a Python 3.8 `neoag-snaf` compatibility environment (`--skip-snaf` opts out). SNAF pip uses `${SNAF_ENV_PREFIX}/bin/python -m pip`: pre-install `tensorflow==2.3.0` and `protobuf==3.20.3`, then install remaining SNAF runtime pins with those versions constrained, then install the pinned snapshot with `--no-deps` so pip cannot backtrack onto TensorFlow 2.12+. SpliceMutr is installed from a pinned source snapshot in `neoag-splicemutr` (`--skip-splicemutr` opts out). SpliceMutr smoke and `splicemutr-neoag` must call `${NEOAG_SPLICEMUTR_ENV_PREFIX}/bin/{python,Rscript,snakemake}` with `VIRTUAL_ENV`/`PYTHONPATH`/`R_LIBS*` unset; do not use `conda run`. Stage `BSgenome.Hsapiens.UCSC.hg38` into that prefix R library, not only the reference-root copy. SpecHLA, HLA-LA, and HMF PURPLE are registered
 by loading staged container images when Docker is available and by writing
 portable wrappers/environment variables into the production activation script.
 The consolidated `--splice` group intentionally excludes ASNEO, NeoSplice, and
@@ -173,7 +171,7 @@ work with `CONDA_BASE=<target-env_tool>/miniforge3`. When the asset manifest
 provides the NetMHCpan image tarball, the installer loads it and writes the
 portable container wrapper automatically; it does not download licensed payloads.
 
-`13_install_readme_tools.sh --run-real-vcf-smoke` runs an explicitly supplied
+`16_install_new_machine.sh --run-real-vcf-smoke` runs an explicitly supplied
 VCF smoke test after installation. The smoke test runs
 MHCflurry and NetMHCstabpan by default; NetMHCstabpan may be skipped only for debugging because production evidence requires it,
 and accepts `--real-vcf-smoke-top-n <N>` for a smaller or larger test.
@@ -209,8 +207,8 @@ asset locations so a new machine can prepare itself reproducibly:
   `--netmhcpan-dir`, `--netmhcpan-url`, `--mixmhcpred-dir`,
   `--mixmhcpred-archive`, and `--mixmhcpred-url`; do not bundle or download
   them unless the user has rights and approves the source.
-- Install OptiType and BAM-matcher with `13_install_readme_tools.sh --optitype
-  --bam-matcher`. On capacity-constrained hosts, point their environment
+- Install OptiType and BAM-matcher through the `--standard` or `--all-open`
+  profile of `16_install_new_machine.sh`. On capacity-constrained hosts, point their environment
   prefixes at the shared tool tree and expose them below the deployment root
   with symlinks. BAM-matcher requires its pinned Python 2.7 stack; install
   `Cheetah3==3.2.6.post2` with pip after creating the Conda environment because

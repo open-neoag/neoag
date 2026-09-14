@@ -19,11 +19,23 @@ Usage:
     [--project-root <neo_repo_root>] \
     [--profile <profiles/*.toml>] \
     [--evidence-consensus-rules <configs/ranking/*.toml>] \
+    [--clinical-context <clinical.yaml|json>] \
     [--event-top-n <N; default 20>] \
     [--candidate-top-n <N; default 100>] \
     [--asset-root <liup_neodata4git>] \
     [--reference-fasta <GRCh38.fasta>] \
+    [--tumor-dna-bam <tumor.bam> --normal-dna-bam <normal.bam>] \
+    [--tumor-sample-name <VCF sample> --normal-sample-name <VCF sample>] \
+    [--assay-type <WGS|WES|PANEL|UNKNOWN>] \
+    [--capture-bed <required for WES/PANEL DNA-SV>] \
+    [--sv-vcf <existing DNA-SV VCF; repeatable>] \
+    [--sv-caller <caller matching each --sv-vcf; repeatable>] \
+    [--skip-dna-sv <explicitly leave DNA-SV unassessed>] \
+    [--bam-matcher-loci <GRCh38 identity SNP VCF>] \
+    [--skip-bam-matcher] \
     [--vep-cache <VEP cache root>] \
+    [--vep-plugins <directory containing Wildtype.pm and Frameshift.pm>] \
+    [--vep-bin <installed VEP executable or wrapper>] \
     [--gencode-gtf <matching.gtf; also used for exact splice strand/origin reconstruction>] \
     [--hla-file <consensus HLA allele file>] \
     [--sequenza <result_file_or_dir>] \
@@ -35,6 +47,10 @@ Usage:
     [--rna-fastq1 <R1.fq.gz[,lane2_R1.fq.gz]>] \
     [--rna-fastq2 <R2.fq.gz[,lane2_R2.fq.gz]>] \
     [--rna-bam <sorted_rna.bam> | --rna-vaf <rna_alt_vaf.tsv>] \
+    [--splice-rna-bam <sorted_rna.bam; independent splice read QC>] \
+    [--splice-star-sj <matching STAR/SJ.out.tab>] \
+    [--matched-normal-rna-bam <optional matched-normal RNA BAM>] \
+    [--matched-normal-star-sj <matching normal STAR/SJ.out.tab>] \
     [--star-index <GRCh38_STAR_index>] \
     [--easyfuse-star-index <EasyFuse_STAR_index>] \
     [--star-index-build-dir <new_STAR_index_dir>] \
@@ -47,7 +63,11 @@ Usage:
     [--max-parallel-stages <N>] \
     [--fusion-caller-root <completed_caller_results_dir>] \
     [--star-chimeric <STAR/Chimeric.out.junction; repeatable>] \
+    [--fusion-expressed-products <confirmed expressed_products.tsv>] \
+    [--star-sj <STAR/SJ.out.tab for splice evidence>] \
     [--normal-readthrough <normal_readthrough.tsv>] \
+    [--snaf <completed snaf_candidates.tsv>] \
+    [--splicemutr <completed SpliceMutr result directory>] \
     [--prime-evidence <prime_evidence.tsv>] \
     [--bigmhc-evidence <bigmhc_im_evidence.tsv>] \
     [--deepimmuno-evidence <deepimmuno_evidence.tsv>] \
@@ -67,6 +87,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="${NEOAG_PYTHON:-$(command -v python3 || command -v python || true)}"
 PROFILE="profiles/sarcoma_rna_supported_v2_provisional.toml"
 EVIDENCE_CONSENSUS_RULES="configs/ranking/sarcoma_evidence_consensus_v3_source_chain.toml"
+COHORT_RULE_SET="configs/cohorts/dsrct_v1.toml"
 EVENT_TOP_N=20
 CANDIDATE_TOP_N=100
 ASSET="${NEOAG_ASSET_ROOT:-${NEOAG_TOOLS_ROOT:-}}"
@@ -84,8 +105,26 @@ CASE_ROOT=""
 OUTDIR=""
 SOMATIC_VCF=""
 REFERENCE_FASTA=""
+TUMOR_DNA_BAM=""
+NORMAL_DNA_BAM=""
+TUMOR_SAMPLE_NAME=""
+NORMAL_SAMPLE_NAME=""
+ASSAY_TYPE="UNKNOWN"
+CAPTURE_BED=""
+SV_VCFS=()
+SV_CALLERS=()
+SKIP_DNA_SV=0
+BAM_MATCHER_LOCI="${BAM_MATCHER_LOCI:-}"
+SKIP_BAM_MATCHER=0
+SV_THREADS="${NEOAG_SV_THREADS:-8}"
+SV_MEMORY_GB="${NEOAG_SV_MEMORY_GB:-48}"
+SV_NEXTFLOW_CONFIG="${NEOAG_SV_NEXTFLOW_CONFIG:-}"
+SV_NEXTFLOW_PROFILE="${NEOAG_SV_NEXTFLOW_PROFILE:-}"
 VEP_CACHE="${NEOAG_VEP_CACHE:-}"
+VEP_PLUGINS="${NEOAG_VEP_PLUGINS:-}"
+VEP_BIN="${NEOAG_VEP_BIN:-}"
 GENCODE_GTF=""
+CLINICAL_CONTEXT=""
 HLA_FILE=""
 SEQUENZA=""
 PURPLE=""
@@ -97,6 +136,10 @@ RNA_FASTQ1=""
 RNA_FASTQ2=""
 RNA_BAM=""
 RNA_VAF=""
+SPLICE_RNA_BAM=""
+SPLICE_STAR_SJ=""
+MATCHED_NORMAL_RNA_BAM=""
+MATCHED_NORMAL_STAR_SJ=""
 STAR_INDEX=""
 EASYFUSE_STAR_INDEX="${EASYFUSE_STAR_INDEX:-}"
 STAR_INDEX_BUILD_DIR=""
@@ -109,7 +152,11 @@ TOTAL_MEMORY_GB="${NEOAG_TOTAL_MEMORY_GB:-0}"
 MAX_PARALLEL_STAGES="${NEOAG_MAX_PARALLEL_STAGES:-3}"
 FUSION_CALLER_ROOTS=()
 STAR_CHIMERIC_FILES=()
+FUSION_EXPRESSED_PRODUCTS=""
+STAR_SJ=""
 NORMAL_READTHROUGH=""
+SNAF_RESULT=""
+SPLICEMUTR_RESULT=""
 PRIME_EVIDENCE=""
 BIGMHC_EVIDENCE=""
 DEEPIMMUNO_EVIDENCE=""
@@ -123,11 +170,30 @@ while [[ $# -gt 0 ]]; do
     --project-root) PROJECT_ROOT="$2"; shift 2 ;;
     --profile) PROFILE="$2"; shift 2 ;;
     --evidence-consensus-rules) EVIDENCE_CONSENSUS_RULES="$2"; shift 2 ;;
+    --cohort-rule-set) COHORT_RULE_SET="$2"; shift 2 ;;
+    --clinical-context) CLINICAL_CONTEXT="$2"; shift 2 ;;
     --event-top-n) EVENT_TOP_N="$2"; shift 2 ;;
     --candidate-top-n) CANDIDATE_TOP_N="$2"; shift 2 ;;
     --asset-root) ASSET="$2"; CLI_ASSET="$2"; shift 2 ;;
     --reference-fasta) REFERENCE_FASTA="$2"; shift 2 ;;
+    --tumor-dna-bam) TUMOR_DNA_BAM="$2"; shift 2 ;;
+    --normal-dna-bam) NORMAL_DNA_BAM="$2"; shift 2 ;;
+    --tumor-sample-name) TUMOR_SAMPLE_NAME="$2"; shift 2 ;;
+    --normal-sample-name) NORMAL_SAMPLE_NAME="$2"; shift 2 ;;
+    --assay-type) ASSAY_TYPE="${2^^}"; shift 2 ;;
+    --capture-bed) CAPTURE_BED="$2"; shift 2 ;;
+    --sv-vcf) IFS=',' read -r -a _sv_values <<< "$2"; SV_VCFS+=("${_sv_values[@]}"); shift 2 ;;
+    --sv-caller) SV_CALLERS+=("$2"); shift 2 ;;
+    --skip-dna-sv) SKIP_DNA_SV=1; shift ;;
+    --bam-matcher-loci) BAM_MATCHER_LOCI="$2"; shift 2 ;;
+    --skip-bam-matcher) SKIP_BAM_MATCHER=1; shift ;;
+    --sv-threads) SV_THREADS="$2"; shift 2 ;;
+    --sv-memory-gb) SV_MEMORY_GB="$2"; shift 2 ;;
+    --sv-nextflow-config) SV_NEXTFLOW_CONFIG="$2"; shift 2 ;;
+    --sv-nextflow-profile) SV_NEXTFLOW_PROFILE="$2"; shift 2 ;;
     --vep-cache) VEP_CACHE="$2"; shift 2 ;;
+    --vep-plugins) VEP_PLUGINS="$2"; shift 2 ;;
+    --vep-bin) VEP_BIN="$2"; shift 2 ;;
     --gencode-gtf) GENCODE_GTF="$2"; shift 2 ;;
     --hla-file) HLA_FILE="$2"; shift 2 ;;
     --sequenza) SEQUENZA="$2"; shift 2 ;;
@@ -140,6 +206,10 @@ while [[ $# -gt 0 ]]; do
     --rna-fastq2) RNA_FASTQ2="$2"; shift 2 ;;
     --rna-bam) RNA_BAM="$2"; shift 2 ;;
     --rna-vaf) RNA_VAF="$2"; shift 2 ;;
+    --splice-rna-bam) SPLICE_RNA_BAM="$2"; shift 2 ;;
+    --splice-star-sj) SPLICE_STAR_SJ="$2"; shift 2 ;;
+    --matched-normal-rna-bam) MATCHED_NORMAL_RNA_BAM="$2"; shift 2 ;;
+    --matched-normal-star-sj) MATCHED_NORMAL_STAR_SJ="$2"; shift 2 ;;
     --star-index) STAR_INDEX="$2"; shift 2 ;;
     --easyfuse-star-index) EASYFUSE_STAR_INDEX="$2"; shift 2 ;;
     --star-index-build-dir) STAR_INDEX_BUILD_DIR="$2"; shift 2 ;;
@@ -152,7 +222,11 @@ while [[ $# -gt 0 ]]; do
     --max-parallel-stages) MAX_PARALLEL_STAGES="$2"; shift 2 ;;
     --fusion-caller-root) FUSION_CALLER_ROOTS+=("$2"); shift 2 ;;
     --star-chimeric) STAR_CHIMERIC_FILES+=("$2"); shift 2 ;;
+    --fusion-expressed-products) FUSION_EXPRESSED_PRODUCTS="$2"; shift 2 ;;
+    --star-sj) STAR_SJ="$2"; shift 2 ;;
     --normal-readthrough) NORMAL_READTHROUGH="$2"; shift 2 ;;
+    --snaf) SNAF_RESULT="$2"; shift 2 ;;
+    --splicemutr) SPLICEMUTR_RESULT="$2"; shift 2 ;;
     --prime-evidence) PRIME_EVIDENCE="$2"; shift 2 ;;
     --bigmhc-evidence) BIGMHC_EVIDENCE="$2"; shift 2 ;;
     --deepimmuno-evidence) DEEPIMMUNO_EVIDENCE="$2"; shift 2 ;;
@@ -177,22 +251,55 @@ TOTAL_CPUS="${TOTAL_CPUS:-$RNA_THREADS}"
 [[ "$TOTAL_MEMORY_GB" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "--total-memory-gb must be a non-negative number" >&2; exit 2; }
 [[ "$MAX_PARALLEL_STAGES" =~ ^[1-9][0-9]*$ ]] || { echo "--max-parallel-stages must be a positive integer" >&2; exit 2; }
 [[ "$STAR_SJDB_OVERHANG" =~ ^[1-9][0-9]*$ ]] || { echo "--star-sjdb-overhang must be a positive integer" >&2; exit 2; }
+[[ "$ASSAY_TYPE" == "CAPTURE" ]] && ASSAY_TYPE="PANEL"
+[[ "$ASSAY_TYPE" =~ ^(WGS|WES|PANEL|UNKNOWN)$ ]] || { echo "--assay-type must be WGS, WES, PANEL, CAPTURE, or UNKNOWN" >&2; exit 2; }
+[[ "$SV_THREADS" =~ ^[1-9][0-9]*$ ]] || { echo "--sv-threads must be a positive integer" >&2; exit 2; }
+[[ "$SV_MEMORY_GB" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "--sv-memory-gb must be a positive number" >&2; exit 2; }
+if [[ ( -n "$TUMOR_DNA_BAM" && -z "$NORMAL_DNA_BAM" ) || ( -z "$TUMOR_DNA_BAM" && -n "$NORMAL_DNA_BAM" ) ]]; then
+  echo "--tumor-dna-bam and --normal-dna-bam must be supplied together" >&2
+  exit 2
+fi
+if [[ ( -n "$TUMOR_SAMPLE_NAME" && -z "$NORMAL_SAMPLE_NAME" ) || ( -z "$TUMOR_SAMPLE_NAME" && -n "$NORMAL_SAMPLE_NAME" ) ]]; then
+  echo "--tumor-sample-name and --normal-sample-name must be supplied together" >&2
+  exit 2
+fi
+if (( ${#SV_CALLERS[@]} > 0 && ${#SV_CALLERS[@]} != ${#SV_VCFS[@]} )); then
+  echo "--sv-caller must be repeated once for every --sv-vcf" >&2
+  exit 2
+fi
+if [[ "$ASSAY_TYPE" =~ ^(WES|PANEL)$ && "$SKIP_DNA_SV" != 1 && -z "$CAPTURE_BED" ]]; then
+  echo "$ASSAY_TYPE DNA-SV production requires --capture-bed" >&2
+  exit 2
+fi
+if [[ "$ASSAY_TYPE" =~ ^(WGS|WES|PANEL)$ && "$SKIP_DNA_SV" != 1 && ${#SV_VCFS[@]} -eq 0 && -z "$TUMOR_DNA_BAM" ]]; then
+  echo "$ASSAY_TYPE DNA-SV production requires --sv-vcf or an explicit tumor/normal BAM pair" >&2
+  exit 2
+fi
 [[ -z "$RNA_FASTQ1" && -z "$RNA_FASTQ2" ]] || {
   [[ -n "$RNA_FASTQ1" && -n "$RNA_FASTQ2" ]] || {
     echo "--rna-fastq1 and --rna-fastq2 must be supplied together" >&2
     exit 2
   }
 }
-rna_input_modes=0
-[[ -n "$RNA_FASTQ1" ]] && ((rna_input_modes+=1))
-[[ -n "$RNA_BAM" ]] && ((rna_input_modes+=1))
-[[ -n "$RNA_VAF" ]] && ((rna_input_modes+=1))
-((rna_input_modes <= 1)) || {
-  echo "Use only one RNA allele-evidence input mode: FASTQ pair, BAM, or existing RNA VAF" >&2
+rna_alignment_modes=0
+[[ -n "$RNA_FASTQ1" ]] && ((rna_alignment_modes+=1))
+[[ -n "$RNA_BAM" ]] && ((rna_alignment_modes+=1))
+((rna_alignment_modes <= 1)) || {
+  echo "Use only one RNA allele-evidence input mode: FASTQ pair or existing BAM" >&2
   exit 2
 }
+if [[ -n "$RNA_FASTQ1" && -n "$RNA_VAF" ]]; then
+  echo "Existing RNA VAF can accompany an existing RNA BAM, but not FASTQ alignment mode" >&2
+  exit 2
+fi
 if [[ -n "$RNA_FASTQ1" ]]; then
   [[ -n "$GENCODE_GTF" ]] || { echo "RNA FASTQ mode requires --gencode-gtf" >&2; exit 2; }
+fi
+if [[ -n "$MATCHED_NORMAL_RNA_BAM" || -n "$MATCHED_NORMAL_STAR_SJ" ]]; then
+  [[ -n "$MATCHED_NORMAL_RNA_BAM" && -n "$MATCHED_NORMAL_STAR_SJ" ]] || {
+    echo "--matched-normal-rna-bam and --matched-normal-star-sj must be supplied together" >&2
+    exit 2
+  }
 fi
 
 verify_event_track_precedence() {
@@ -400,6 +507,9 @@ PROFILE_PATH="$PROFILE"
 CONSENSUS_RULES_PATH="$EVIDENCE_CONSENSUS_RULES"
 [[ "$CONSENSUS_RULES_PATH" = /* ]] || CONSENSUS_RULES_PATH="$PROJECT_ROOT/$EVIDENCE_CONSENSUS_RULES"
 [[ -f "$CONSENSUS_RULES_PATH" ]] || { echo "evidence-consensus rules missing: $CONSENSUS_RULES_PATH" >&2; exit 2; }
+COHORT_RULE_SET_PATH="$COHORT_RULE_SET"
+[[ "$COHORT_RULE_SET_PATH" = /* ]] || COHORT_RULE_SET_PATH="$PROJECT_ROOT/$COHORT_RULE_SET"
+[[ -f "$COHORT_RULE_SET_PATH" ]] || { echo "cohort rule contract missing: $COHORT_RULE_SET_PATH" >&2; exit 2; }
 
 STABPAN_BIN="${NETMHCSTABPAN_HOME}/Linux_x86_64/bin/netMHCstabpan"
 [[ -x "$STABPAN_BIN" && -d "${NETMHCSTABPAN_HOME}/data" ]] || {
@@ -425,13 +535,18 @@ add_file_if() {
 ensure_normal_junction_index() {
   local normal_junctions="$1"
   local index_path="${normal_junctions}.sqlite"
-  if [[ ! -s "$normal_junctions" || -s "$index_path" ]]; then
+  if [[ ! -s "$normal_junctions" ]]; then
+    return 0
+  fi
+  if [[ -s "$index_path" ]] && PYTHONPATH="$PROJECT_ROOT/src" "$PY" scripts/build_normal_junction_index.py \
+      --input "$normal_junctions" --output "$index_path" --check; then
     return 0
   fi
   echo "[INFO] build normal junction sqlite index: $index_path"
   PYTHONPATH="$PROJECT_ROOT/src" "$PY" scripts/build_normal_junction_index.py \
     --input "$normal_junctions" \
-    --output "$index_path"
+    --output "$index_path" \
+    --force
 }
 
 latest_matching_file() {
@@ -456,10 +571,35 @@ add_first_existing() {
   return 1
 }
 
+if [[ -z "$BAM_MATCHER_LOCI" && -n "$ASSET" ]]; then
+  for candidate in \
+    "$ASSET/data/sample_identity/bam_matcher.common_snps.hg38.vcf" \
+    "$ASSET/data/sample_identity/bam_matcher.common_snps.hg38.vcf.gz"; do
+    if [[ -s "$candidate" ]]; then
+      BAM_MATCHER_LOCI="$candidate"
+      break
+    fi
+  done
+fi
+
+if [[ -n "$TUMOR_DNA_BAM" ]]; then
+  for bam in "$TUMOR_DNA_BAM" "$NORMAL_DNA_BAM"; do
+    [[ -s "$bam" ]] || { echo "DNA BAM missing or empty: $bam" >&2; exit 2; }
+    [[ -s "$bam.bai" || -s "${bam%.bam}.bai" ]] || {
+      echo "DNA BAM index missing for $bam" >&2
+      exit 2
+    }
+  done
+fi
+for sv_vcf in "${SV_VCFS[@]}"; do
+  [[ -s "$sv_vcf" ]] || { echo "DNA-SV VCF missing or empty: $sv_vcf" >&2; exit 2; }
+done
+
 GEN_ARGS=(
   --project-root "$PROJECT_ROOT"
   --sample-id "$SAMPLE_ID"
   --profile "$PROFILE_PATH"
+  --cohort-rule-set "$COHORT_RULE_SET_PATH"
   --evidence-consensus-rules "$CONSENSUS_RULES_PATH"
   --event-top-n "$EVENT_TOP_N"
   --candidate-top-n "$CANDIDATE_TOP_N"
@@ -467,6 +607,22 @@ GEN_ARGS=(
   --output "$OUTDIR/manifest/production.results.toml"
   --somatic-vcf "$SOMATIC_VCF"
 )
+
+[[ -n "$CLINICAL_CONTEXT" ]] && GEN_ARGS+=(--clinical-context "$CLINICAL_CONTEXT")
+[[ -n "$TUMOR_DNA_BAM" ]] && GEN_ARGS+=(--tumor-dna-bam "$TUMOR_DNA_BAM" --normal-dna-bam "$NORMAL_DNA_BAM")
+[[ -n "$TUMOR_SAMPLE_NAME" ]] && GEN_ARGS+=(--tumor-sample-name "$TUMOR_SAMPLE_NAME" --normal-sample-name "$NORMAL_SAMPLE_NAME")
+GEN_ARGS+=(--assay-type "$ASSAY_TYPE" --sv-threads "$SV_THREADS" --sv-memory-gb "$SV_MEMORY_GB")
+[[ -n "$CAPTURE_BED" ]] && GEN_ARGS+=(--capture-bed "$CAPTURE_BED")
+for sv_vcf in "${SV_VCFS[@]}"; do GEN_ARGS+=(--sv-vcf "$sv_vcf"); done
+for sv_caller in "${SV_CALLERS[@]}"; do GEN_ARGS+=(--sv-caller "$sv_caller"); done
+[[ "$SKIP_DNA_SV" == 1 ]] && GEN_ARGS+=(--skip-dna-sv)
+if [[ "$SKIP_BAM_MATCHER" == 1 ]]; then
+  GEN_ARGS+=(--skip-bam-matcher)
+elif [[ -n "$BAM_MATCHER_LOCI" ]]; then
+  GEN_ARGS+=(--bam-matcher-loci "$BAM_MATCHER_LOCI")
+fi
+[[ -n "$SV_NEXTFLOW_CONFIG" ]] && GEN_ARGS+=(--sv-nextflow-config "$SV_NEXTFLOW_CONFIG")
+[[ -n "$SV_NEXTFLOW_PROFILE" ]] && GEN_ARGS+=(--sv-nextflow-profile "$SV_NEXTFLOW_PROFILE")
 
 if [[ -n "$HLA_FILE" ]]; then
   add_if --hla-file "$HLA_FILE"
@@ -480,10 +636,27 @@ elif ! add_first_existing --hla-file \
   add_if --spechla-typing "$CASE_ROOT/hla/spechla/typing/normal/${SAMPLE_ID}_blood/hla.result.txt"
   add_if --hla-la "$CASE_ROOT/hla/hla_la/working/${SAMPLE_ID}_blood/hla/R1_bestguess_G.txt"
 fi
-add_if --facets "$CASE_ROOT/facets/omni2p5_snponly_downsample"
-add_if --ascat "$CASE_ROOT/ascat"
-if [[ -n "$SEQUENZA" ]]; then GEN_ARGS+=(--sequenza "$SEQUENZA"); else add_if --sequenza "$CASE_ROOT/sequenza"; fi
-if [[ -n "$PURPLE" ]]; then GEN_ARGS+=(--purple "$PURPLE"); else add_if --purple "$CASE_ROOT/purple"; fi
+add_first_existing --facets \
+  "$CASE_ROOT/purity/facets" \
+  "$CASE_ROOT/facets/omni2p5_snponly_downsample" \
+  "$CASE_ROOT/facets" || true
+add_first_existing --ascat \
+  "$CASE_ROOT/purity/ascat" \
+  "$CASE_ROOT/ascat" || true
+if [[ -n "$SEQUENZA" ]]; then
+  GEN_ARGS+=(--sequenza "$SEQUENZA")
+else
+  add_first_existing --sequenza \
+    "$CASE_ROOT/purity/sequenza" \
+    "$CASE_ROOT/sequenza" || true
+fi
+if [[ -n "$PURPLE" ]]; then
+  GEN_ARGS+=(--purple "$PURPLE")
+else
+  add_first_existing --purple \
+    "$CASE_ROOT/purity/purple" \
+    "$CASE_ROOT/purple" || true
+fi
 add_first_existing --purity \
   "$CASE_ROOT/purity/consensus/recommended_purity.tsv" \
   "$CASE_ROOT/evidence/purity.tsv" || true
@@ -528,12 +701,13 @@ else
     "$CASE_ROOT/short-rna/evidence/transcript_quant.sf" \
     "$discovered_transcript_expression" || true
 fi
-if [[ -z "$RNA_FASTQ1" && -z "$RNA_BAM" && -z "$RNA_VAF" ]]; then
-  discovered_rna_vaf="$(latest_matching_file "$CASE_ROOT" -name rna_alt_vaf.tsv -o -name '*rna*vaf*.tsv' -o -name '*rna*alt*.tsv')"
-  [[ -z "$discovered_rna_vaf" && -d "$OUTDIR" ]] && discovered_rna_vaf="$(latest_matching_file "$OUTDIR" -name rna_alt_vaf.tsv -o -name '*rna*vaf*.tsv' -o -name '*rna*alt*.tsv')"
-  if [[ -n "$discovered_rna_vaf" ]]; then
-    RNA_VAF="$discovered_rna_vaf"
-  else
+if [[ -z "$RNA_FASTQ1" ]]; then
+  if [[ -z "$RNA_VAF" ]]; then
+    discovered_rna_vaf="$(latest_matching_file "$CASE_ROOT" -name rna_alt_vaf.tsv -o -name '*rna*vaf*.tsv' -o -name '*rna*alt*.tsv')"
+    [[ -z "$discovered_rna_vaf" && -d "$OUTDIR" ]] && discovered_rna_vaf="$(latest_matching_file "$OUTDIR" -name rna_alt_vaf.tsv -o -name '*rna*vaf*.tsv' -o -name '*rna*alt*.tsv')"
+    [[ -n "$discovered_rna_vaf" ]] && RNA_VAF="$discovered_rna_vaf"
+  fi
+  if [[ -z "$RNA_BAM" ]]; then
     discovered_rna_bam="$(latest_matching_file "$CASE_ROOT" -name Aligned.sortedByCoord.out.bam -o -name '*.Aligned.sortedByCoord.out.bam' -o -name '*.rna.bam')"
     [[ -z "$discovered_rna_bam" && -d "$OUTDIR" ]] && discovered_rna_bam="$(latest_matching_file "$OUTDIR" -name Aligned.sortedByCoord.out.bam -o -name '*.Aligned.sortedByCoord.out.bam' -o -name '*.rna.bam')"
     if [[ -z "$discovered_rna_bam" ]]; then
@@ -551,6 +725,42 @@ if [[ -z "$RNA_FASTQ1" && -z "$RNA_BAM" && -z "$RNA_VAF" ]]; then
     fi
     [[ -n "$discovered_rna_bam" ]] && RNA_BAM="$discovered_rna_bam"
   fi
+fi
+
+# Splice read QC is independent from SNV/InDel RNA allele counting.  Discover
+# the STAR pair even when an existing RNA VAF table was selected above.
+if [[ -z "$SPLICE_RNA_BAM" ]]; then
+  SPLICE_RNA_BAM="$(latest_matching_file "$CASE_ROOT" -name Aligned.sortedByCoord.out.bam -o -name '*.Aligned.sortedByCoord.out.bam' -o -name '*.rna.bam')"
+  [[ -z "$SPLICE_RNA_BAM" && -d "$OUTDIR" ]] && SPLICE_RNA_BAM="$(latest_matching_file "$OUTDIR" -name Aligned.sortedByCoord.out.bam -o -name '*.Aligned.sortedByCoord.out.bam' -o -name '*.rna.bam')"
+  [[ -z "$SPLICE_RNA_BAM" && -n "$RNA_BAM" ]] && SPLICE_RNA_BAM="$RNA_BAM"
+fi
+if [[ -z "$SPLICE_STAR_SJ" && -n "$SPLICE_RNA_BAM" ]]; then
+  for candidate in \
+    "$(dirname "$SPLICE_RNA_BAM")/SJ.out.tab" \
+    "$CASE_ROOT/short-rna/star/SJ.out.tab" \
+    "$OUTDIR/rna/star/SJ.out.tab"; do
+    if [[ -s "$candidate" ]]; then
+      SPLICE_STAR_SJ="$candidate"
+      break
+    fi
+  done
+fi
+if [[ "$SAMTOOLS_EXECUTABLE" == "samtools" ]] && ! command -v samtools >/dev/null 2>&1; then
+  for candidate in \
+    "${NEOAG_SAMTOOLS:-}" \
+    "${CONDA_PREFIX:-}/bin/samtools" \
+    "${NEOAG_CONDA_BASE:-}/envs/neoag-splice/bin/samtools" \
+    "${NEOAG_CONDA_BASE:-}/envs/neoag-sv/bin/samtools" \
+    "${NEOAG_CONDA_BASE:-}/envs/neoag-tools/bin/samtools" \
+    "${NEOAG_ENV_TOOL_ROOT:-}/envs/neoag-splice/bin/samtools" \
+    "${NEOAG_ENV_TOOL_ROOT:-}/envs/neoag-sv/bin/samtools" \
+    "${NEOAG_ENV_TOOL_ROOT:-}/envs/neoag-tools/bin/samtools" \
+    "${NEOAG_ENV_TOOL_ROOT:-}/tools/samtools/bin/samtools"; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+      SAMTOOLS_EXECUTABLE="$candidate"
+      break
+    fi
+  done
 fi
 add_if --easyfuse "$CASE_ROOT/short-rna/evidence/easyfuse.fusions.pass.csv"
 add_if --star-fusion "$CASE_ROOT/short-rna/evidence/star-fusion.fusion_predictions.tsv"
@@ -571,18 +781,45 @@ for chimeric in "${STAR_CHIMERIC_FILES[@]}" \
   "$OUTDIR/rna/star/Chimeric.out.junction"; do
   [[ -s "$chimeric" ]] && GEN_ARGS+=(--star-chimeric "$chimeric")
 done
+if [[ -n "$FUSION_EXPRESSED_PRODUCTS" ]]; then
+  [[ -s "$FUSION_EXPRESSED_PRODUCTS" ]] || { echo "Confirmed fusion expressed-products table missing or empty: $FUSION_EXPRESSED_PRODUCTS" >&2; exit 2; }
+  GEN_ARGS+=(--fusion-expressed-products "$FUSION_EXPRESSED_PRODUCTS")
+else
+  add_first_existing --fusion-expressed-products \
+    "$CASE_ROOT/fusion/expressed_products.tsv" \
+    "$CASE_ROOT/rna/fusion/expressed_products.tsv" \
+    "$CASE_ROOT/evidence/fusion_expressed_products.tsv" || true
+fi
 [[ -n "$NORMAL_READTHROUGH" ]] && GEN_ARGS+=(--normal-readthrough "$NORMAL_READTHROUGH")
 [[ -n "$PRIME_EVIDENCE" ]] && GEN_ARGS+=(--prime-evidence "$PRIME_EVIDENCE")
 [[ -n "$BIGMHC_EVIDENCE" ]] && GEN_ARGS+=(--bigmhc-evidence "$BIGMHC_EVIDENCE")
 [[ -n "$DEEPIMMUNO_EVIDENCE" ]] && GEN_ARGS+=(--deepimmuno-evidence "$DEEPIMMUNO_EVIDENCE")
-add_if --junctions "$CASE_ROOT/short-rna/evidence/regtools_junctions.tsv"
-add_if --snaf "$CASE_ROOT/short-rna/snaf/snaf_candidates.tsv"
-add_if --splicemutr "$CASE_ROOT/short-rna/splicemutr"
+if [[ -n "$STAR_SJ" ]]; then
+  [[ -s "$STAR_SJ" ]] || { echo "STAR SJ.out.tab missing or empty: $STAR_SJ" >&2; exit 2; }
+  GEN_ARGS+=(--star-sj "$STAR_SJ")
+elif [[ -s "$CASE_ROOT/rna/star/SJ.out.tab" ]]; then
+  GEN_ARGS+=(--star-sj "$CASE_ROOT/rna/star/SJ.out.tab")
+else
+  add_if --junctions "$CASE_ROOT/short-rna/evidence/regtools_junctions.tsv"
+fi
+if [[ -n "$SNAF_RESULT" ]]; then
+  [[ -s "$SNAF_RESULT" ]] || { echo "SNAF result missing or empty: $SNAF_RESULT" >&2; exit 2; }
+  GEN_ARGS+=(--snaf "$SNAF_RESULT")
+else
+  add_if --snaf "$CASE_ROOT/short-rna/snaf/snaf_candidates.tsv"
+fi
+if [[ -n "$SPLICEMUTR_RESULT" ]]; then
+  [[ -d "$SPLICEMUTR_RESULT" ]] || { echo "SpliceMutr result directory missing: $SPLICEMUTR_RESULT" >&2; exit 2; }
+  GEN_ARGS+=(--splicemutr "$SPLICEMUTR_RESULT")
+else
+  add_if --splicemutr "$CASE_ROOT/short-rna/splicemutr"
+fi
 
 if [[ -n "$ASSET" ]]; then
   NORMAL_JUNCTIONS="$ASSET/data/normal/junctions/normal_junctions.GRCh38.tsv.gz"
   ensure_normal_junction_index "$NORMAL_JUNCTIONS"
   add_file_if --normal-junctions "$NORMAL_JUNCTIONS"
+  [[ -s "${NORMAL_JUNCTIONS}.sqlite" ]] && GEN_ARGS+=(--normal-junction-sqlite "${NORMAL_JUNCTIONS}.sqlite")
   add_file_if --normal-expression "$ASSET/data/normal/expression/normal_expression.gtex_v11_hpa_hspc.tsv"
   add_file_if --normal-hla-ligands "$ASSET/data/normal/ligandome/normal_ms_ligands.tsv"
   discovered_reference_proteome=""
@@ -618,10 +855,40 @@ if [[ -z "$VEP_CACHE" && -n "$ASSET" && -d "$ASSET/data/vep/homo_sapiens" ]]; th
   VEP_CACHE="$ASSET/data/vep"
 fi
 [[ -n "$VEP_CACHE" ]] && GEN_ARGS+=(--vep-cache "$VEP_CACHE")
+if [[ -z "$VEP_PLUGINS" && -n "$ASSET" && -f "$ASSET/work/vep_plugins/Wildtype.pm" && -f "$ASSET/work/vep_plugins/Frameshift.pm" ]]; then
+  VEP_PLUGINS="$ASSET/work/vep_plugins"
+fi
+[[ -n "$VEP_PLUGINS" ]] && GEN_ARGS+=(--vep-plugins "$VEP_PLUGINS")
+if [[ -z "$VEP_BIN" ]]; then
+  VEP_BIN="${NEOAG_VEP_BIN:-}"
+fi
+if [[ -z "$VEP_BIN" ]]; then
+  for candidate in \
+    "$PROJECT_ROOT/bin/vep-neoag" \
+    "${NEOAG_TOOLS_ROOT:-}/bin/vep-neoag" \
+    "${NEOAG_CONDA_BASE:-}/envs/${NEOAG_VEP_ENV:-neoag-vep}/bin/vep" \
+    "$(command -v vep 2>/dev/null || true)"; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+      VEP_BIN="$candidate"
+      break
+    fi
+  done
+fi
+[[ -n "$VEP_BIN" ]] && GEN_ARGS+=(--vep-bin "$VEP_BIN")
 [[ -n "$GENCODE_GTF" ]] && GEN_ARGS+=(--gencode-gtf "$GENCODE_GTF")
 [[ -n "$RNA_FASTQ1" ]] && GEN_ARGS+=(--rna-fastq1 "$RNA_FASTQ1" --rna-fastq2 "$RNA_FASTQ2")
 [[ -n "$RNA_BAM" ]] && GEN_ARGS+=(--rna-bam "$RNA_BAM")
 [[ -n "$RNA_VAF" ]] && GEN_ARGS+=(--rna-vaf "$RNA_VAF")
+if [[ -n "$SPLICE_RNA_BAM" || -n "$SPLICE_STAR_SJ" ]]; then
+  if [[ -n "$SPLICE_RNA_BAM" && -n "$SPLICE_STAR_SJ" ]]; then
+    GEN_ARGS+=(--splice-rna-bam "$SPLICE_RNA_BAM" --splice-star-sj "$SPLICE_STAR_SJ")
+  else
+    echo "[WARN] splice read QC requires a matching RNA BAM and STAR SJ.out.tab; leaving read/coverage/PSI unassessed" >&2
+  fi
+fi
+if [[ -n "$MATCHED_NORMAL_RNA_BAM" ]]; then
+  GEN_ARGS+=(--matched-normal-rna-bam "$MATCHED_NORMAL_RNA_BAM" --matched-normal-star-sj "$MATCHED_NORMAL_STAR_SJ")
+fi
 [[ -n "$STAR_INDEX" ]] && GEN_ARGS+=(--star-index "$STAR_INDEX")
 [[ -n "$EASYFUSE_STAR_INDEX" ]] && GEN_ARGS+=(--easyfuse-star-index "$EASYFUSE_STAR_INDEX")
 [[ -n "$STAR_INDEX_BUILD_DIR" ]] && GEN_ARGS+=(--star-index-build-dir "$STAR_INDEX_BUILD_DIR")
@@ -632,10 +899,18 @@ GEN_ARGS+=(--samtools-executable "$SAMTOOLS_EXECUTABLE" --rna-threads "$RNA_THRE
 echo "[INFO] generate manifest: $OUTDIR/manifest/production.results.toml"
 "$PY" scripts/generate_production_from_results_manifest.py "${GEN_ARGS[@]}"
 
-[[ -n "$ASSET" ]] && export NEOAG_TOOLS_ROOT="$ASSET"
-[[ -n "$PRED_DEPS" ]] && export NEOAG_TOOL_QUARANTINE="$PRED_DEPS"
+if [[ -n "$ASSET" ]]; then
+  export NEOAG_TOOLS_ROOT="$ASSET"
+  export NEOAG_ASSET_ROOT="$ASSET"
+fi
+if [[ -n "$PRED_DEPS" ]]; then
+  export NEOAG_TOOL_QUARANTINE="$PRED_DEPS"
+  export NEOAG_PREDICTOR_DEPS="$PRED_DEPS"
+fi
 if [[ -n "$ASSET" ]]; then
   export NEOAG_VEP_CACHE="${VEP_CACHE:-$ASSET/data/vep}"
+  export NEOAG_VEP_PLUGINS="${VEP_PLUGINS:-$ASSET/work/vep_plugins}"
+  export NEOAG_VEP_BIN="$VEP_BIN"
 fi
 export NEOAG_VEP_CACHE_VERSION="${NEOAG_VEP_CACHE_VERSION:-105}"
 PY_PREFIX="$(cd "$(dirname "$PY")/.." && pwd)"
@@ -719,6 +994,15 @@ if [[ -d "$OUTDIR/final" ]]; then
   verify_splice_prefilter_outputs \
     "$OUTDIR/final/parsed/splice_prefilter_funnel.tsv" \
     "$OUTDIR/final/parsed/splice_prefilter_decisions.tsv"
+  OPEN_NEO_OUTPUT_ROOT="$OUTDIR/final" PYTHONPATH="$PROJECT_ROOT/src" "$PY" -c '
+import os
+from neoag.open_neo.output_layout import materialize_output_view
+
+print(materialize_output_view(
+    os.environ["OPEN_NEO_OUTPUT_ROOT"],
+    producer="scripts/run_production_case.sh",
+))
+'
 fi
 
 echo "[OK] done: $OUTDIR/final/reports/"

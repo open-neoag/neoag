@@ -18,13 +18,37 @@ from .evidence_provenance import ProvenanceRegistry
 from .evidence_layer import build_standard_evidence_layer
 from .peptide_safety_gate import build_peptide_safety_gate
 from .immune_escape import build_immune_escape_evidence
-from .schemas import PRESENTATION_FIELDS
+from .schemas import PEPTIDE_FIELDS, PRESENTATION_FIELDS
 from .comprehensive_evidence import build_comprehensive_peptide_evidence
 from .splice_prefilter import prefilter_splice_peptides
 from .evidence_consensus import build_evidence_consensus, load_consensus_rules
 from .tools.registry import RunContext
 from .utils import copy_if_different, read_tsv, write_tsv, write_json
 import shutil
+
+
+def _attach_prefilter_safety(raw_peptides_path: Path, peptide_safety_path: Path) -> None:
+    """Attach only directly assessed safety fields needed by the splice funnel."""
+    safety_by_id = {
+        str(row.get("peptide_id") or ""): row
+        for row in read_tsv(peptide_safety_path)
+        if str(row.get("peptide_id") or "")
+    }
+    enriched = []
+    for row in read_tsv(raw_peptides_path):
+        result = dict(row)
+        safety = safety_by_id.get(str(row.get("peptide_id") or ""), {})
+        if safety:
+            result["normal_proteome_exact_match_status"] = str(
+                safety.get("normal_proteome_exact_match_status") or ""
+            )
+            # A presence-only normal junction catalog cannot establish an
+            # adequate-coverage negative, so it is deliberately not promoted
+            # into the prefilter as normal-transcriptome exclusion evidence.
+            if str(safety.get("normal_transcript_junction_match_status") or "").upper() == "DETECTED":
+                result["normal_transcriptome_exact_match_status"] = "DETECTED"
+        enriched.append(result)
+    write_tsv(raw_peptides_path, enriched, PEPTIDE_FIELDS)
 
 
 def run(
@@ -62,6 +86,8 @@ def run(
     report_types=None,
     event_top_n=20,
     candidate_top_n=100,
+    genome_build=None,
+    reference_build=None,
 ):
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -94,6 +120,21 @@ def run(
     else:
         raise ValueError("run requires pvac_paths or pre-built raw_events + raw_peptides")
 
+    peptide_safety_path = safety_dir / "peptide_safety.tsv"
+    event_safety_path = safety_dir / "event_safety.tsv"
+    build_peptide_safety_gate(
+        raw_events=raw_events_path,
+        raw_peptides=raw_peptides_path,
+        out_peptide_safety=peptide_safety_path,
+        out_event_safety=event_safety_path,
+        profile=profile,
+        normal_expression=normal_expression,
+        normal_hla_ligands=normal_hla_ligands,
+        reference_proteome=reference_proteome,
+        normal_junctions=normal_junctions,
+    )
+    _attach_prefilter_safety(raw_peptides_path, peptide_safety_path)
+
     # Preserve the full splice pool, then reduce it before expensive HLA and
     # immunogenicity predictors. Missing evidence enters a bounded REVIEW lane
     # rather than being silently treated as PASS or a biological negative.
@@ -119,8 +160,22 @@ def run(
             elif "lohhla" in path_l:
                 hla_loh_tool = "lohhla"
         provenance_registry.register_converted(hla_loh_tool, hla_loh)
+    purity_rows = []
+    purity_tool_name = "purity"
     if purity:
-        provenance_registry.register_converted("facets", purity)
+        try:
+            purity_rows = read_tsv(purity)
+            if purity_rows:
+                purity_tool_name = first(
+                    purity_rows[0],
+                    ["evidence_tool", "source", "tool", "method"],
+                    purity_tool_name,
+                ) or purity_tool_name
+        except Exception:
+            purity_rows = []
+        if purity_tool_name == "purity" and "facets" in str(purity).lower():
+            purity_tool_name = "facets"
+        provenance_registry.register_converted(purity_tool_name, purity)
     elif cnv:
         provenance_registry.register_converted("facets", cnv)
     if cancer_gene_list:
@@ -189,9 +244,6 @@ def run(
         normal_hla_ligands=normal_hla_ligands,
         sample_id=sample_id,
     )
-    peptide_safety_path = safety_dir / "peptide_safety.tsv"
-    event_safety_path = safety_dir / "event_safety.tsv"
-    build_peptide_safety_gate(raw_events=raw_events_path, raw_peptides=raw_peptides_path, out_peptide_safety=peptide_safety_path, out_event_safety=event_safety_path, profile=profile, normal_expression=normal_expression, normal_hla_ligands=normal_hla_ligands, reference_proteome=reference_proteome, normal_junctions=normal_junctions)
     immune_paths = build_immune_escape_evidence(
         sample_id=sample_id,
         raw_peptides=raw_peptides_path,
@@ -283,10 +335,9 @@ def run(
     }
     purity_tools = []
     if purity:
-        purity_rows = read_tsv(purity)
         if purity_rows:
             purity_tools.append({
-                "tool": str(purity_rows[0].get("evidence_tool") or "FACETS").upper(),
+                "tool": str(purity_tool_name),
                 "purity": str(purity_rows[0].get("purity") or ""),
                 "ploidy": str(purity_rows[0].get("ploidy") or ""),
                 "status": str(purity_rows[0].get("evidence_status") or "ASSESSED"),
@@ -297,6 +348,8 @@ def run(
         "sample_id": sample_id,
         "profile": profile["_profile_name"],
         "entry_mode": entry_mode,
+        "genome_build": str(genome_build or reference_build or "").strip(),
+        "reference_build": str(reference_build or genome_build or "").strip(),
         "tools": provenance_registry.to_json(),
         "warning": "Computational prototype only.",
         "input_files": input_files,

@@ -48,10 +48,91 @@ LOG="${LOG:-${ROOT}/work/run_lohhla_${PATIENT_ID}.log}"
 SAMTOOLS_BIN="${SAMTOOLS_BIN:-${NEOAG_CONDA_BASE}/envs/${NEOAG_GATK_ENV:-neoag-gatk}/bin/samtools}"
 BAM_LINK_DIR="${BAM_LINK_DIR:-${ROOT}/work/bam_links/${PATIENT_ID}}"
 
-PSHOME="${POLYSOLVER_HOME:-${NEOAG_TOOLS_ROOT:-${ROOT}}/tools/polysolver}"
+resolve_polysolver_home() {
+  local candidate
+  for candidate in \
+    "${POLYSOLVER_HOME:-}" \
+    "${NEOAG_LICENSED_ROOT:+${NEOAG_LICENSED_ROOT}/polysolver}" \
+    "${NEOAG_ASSET_ROOT:+${NEOAG_ASSET_ROOT}/data/lohhla/polysolver}" \
+    "${NEOAG_ASSET_ROOT:+${NEOAG_ASSET_ROOT}/data/polysolver}" \
+    "${NEOAG_PUBLIC_ASSET_ROOT:+${NEOAG_PUBLIC_ASSET_ROOT}/data/lohhla/polysolver}" \
+    "${NEOAG_TOOLS_ROOT:-${ROOT}}/tools/polysolver"; do
+    if [[ -n "${candidate}" \
+      && -x "${candidate}/scripts/shell_call_hla_type" \
+      && -s "${candidate}/data/abc_complete.fasta" ]]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+PSHOME="$(resolve_polysolver_home || true)"
+PSHOME="${PSHOME:-${NEOAG_TOOLS_ROOT:-${ROOT}}/tools/polysolver}"
 LOHHLA_HOME="${LOHHLA_HOME:-${NEOAG_TOOLS_ROOT}/tools/lohhla}"
-FUSION_ENV="${LOHHLA_ENV_PREFIX:-${NEOAG_CONDA_BASE}/envs/${NEOAG_FUSION_ENV:-neoag-fusion}}"
 GATK_ENV="${NEOAG_CONDA_BASE}/envs/${NEOAG_GATK_ENV:-neoag-gatk}"
+
+resolve_lohhla_env() {
+  local candidate
+  local -a candidates=()
+  [[ -n "${LOHHLA_ENV_PREFIX:-}" ]] && candidates+=("${LOHHLA_ENV_PREFIX}")
+  candidates+=(
+    "${NEOAG_CONDA_BASE}/envs/neoag-lohhla"
+    "${NEOAG_CONDA_BASE}/envs/${NEOAG_FUSION_ENV:-neoag-fusion}"
+    "${NEOAG_CONDA_BASE}/envs/neoag-r"
+    "${NEOAG_CONDA_BASE}/envs/neoag-splicemutr"
+  )
+  for candidate in "${candidates[@]}"; do
+    [[ -x "${candidate}/bin/Rscript" ]] || continue
+    if "${candidate}/bin/Rscript" -e \
+      'quit(status=ifelse(requireNamespace("optparse",quietly=TRUE)&&requireNamespace("Rsamtools",quietly=TRUE)&&requireNamespace("Biostrings",quietly=TRUE)&&requireNamespace("seqinr",quietly=TRUE),0,1))' \
+      >/dev/null 2>&1; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+  echo "ERROR: no LOHHLA R environment provides optparse, Rsamtools, Biostrings, and seqinr" >&2
+  return 1
+}
+
+FUSION_ENV="$(resolve_lohhla_env)"
+
+# Some deployments split the Bioconductor stack and the small CRAN plotting
+# dependencies across R environments. Reuse a compatible installed library
+# instead of letting LOHHLA attempt an interactive install into a read-only env.
+if ! "${FUSION_ENV}/bin/Rscript" -e \
+  'quit(status=ifelse(requireNamespace("beeswarm", quietly=TRUE), 0, 1))' \
+  >/dev/null 2>&1; then
+  for candidate in \
+    "${NEOAG_CONDA_BASE}/envs/neoag-r/lib/R/library" \
+    "${NEOAG_CONDA_BASE}/envs/neoag-lohhla-r36/lib/R/library"; do
+    [[ -d "${candidate}/beeswarm" ]] || continue
+    export R_LIBS_USER="${candidate}${R_LIBS_USER:+:${R_LIBS_USER}}"
+    break
+  done
+fi
+
+resolve_bedtools_dir() {
+  local candidate
+  if command -v bedtools >/dev/null 2>&1; then
+    dirname "$(command -v bedtools)"
+    return 0
+  fi
+  for candidate in \
+    "${NEOAG_TOOLS_ROOT:-${ROOT}}/bin" \
+    "${NEOAG_CONDA_BASE}/envs/neoag-tools/bin" \
+    "${NEOAG_CONDA_BASE}/envs/neoag-splice/bin" \
+    "${FUSION_ENV}/bin"; do
+    if [[ -x "${candidate}/bedtools" ]]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+  echo "ERROR: bedtools is required by LOHHLA but was not found" >&2
+  return 1
+}
+
+LOHHLA_BEDTOOLS_DIR="$(resolve_bedtools_dir)"
 
 POLYSOLVER_RACE="${POLYSOLVER_RACE:-Unknown}"
 POLYSOLVER_INCLUDE_FREQ="${POLYSOLVER_INCLUDE_FREQ:-1}"
@@ -62,7 +143,10 @@ POLYSOLVER_THREADS="${POLYSOLVER_THREADS:-8}"
 COPYNUM_LOC="${COPYNUM_LOC:-FALSE}"
 MIN_COVERAGE="${MIN_COVERAGE_FILTER:-10}"
 LOHHLA_MAPPING_STEP="${LOHHLA_MAPPING_STEP:-TRUE}"
-LOHHLA_FISHING_STEP="${LOHHLA_FISHING_STEP:-TRUE}"
+# Re-mapping the chromosome 6 reads is required for an allele-specific LOH
+# call.  The optional fishing pass is expensive and can yield no usable reads
+# on WGS/WES inputs, so keep it opt-in for portable production runs.
+LOHHLA_FISHING_STEP="${LOHHLA_FISHING_STEP:-FALSE}"
 LOHHLA_GENOME_ASSEMBLY="${LOHHLA_GENOME_ASSEMBLY:-grch38}"
 
 PS_OUT="${OUT}/polysolver"
@@ -71,7 +155,15 @@ WINNERS="${PS_OUT}/winners.hla.txt"
 PATIENT_HLA_FASTA="${HLA_DIR}/${PATIENT_ID}.patient.hlaFasta.fa"
 LOHHLA_SCRIPT="${LOHHLA_HOME}/LOHHLAscript.R"
 HLA_EXON_LOC="${LOHHLA_HOME}/data/hla.dat"
-LOHHLA_GATK_RUNTIME_DIR="${LOHHLA_GATK_DIR:-${LOHHLA_HOME}}"
+if [[ -n "${LOHHLA_GATK_DIR:-}" ]]; then
+  LOHHLA_GATK_RUNTIME_DIR="${LOHHLA_GATK_DIR}"
+elif [[ -f "${PSHOME}/binaries/SamToFastq.jar" \
+  && -f "${PSHOME}/binaries/SortSam.jar" \
+  && -f "${PSHOME}/binaries/FilterSamReads.jar" ]]; then
+  LOHHLA_GATK_RUNTIME_DIR="${PSHOME}/binaries"
+else
+  LOHHLA_GATK_RUNTIME_DIR="${LOHHLA_HOME}"
+fi
 NOVO_DIR="${PSHOME}/binaries"
 NOVOINDEX="${PSHOME}/scripts/novoindex"
 ABC_FASTA="${PSHOME}/data/abc_complete.fasta"
@@ -210,9 +302,14 @@ write_winners_from_hla_file() {
   {
     for locus in HLA-A HLA-B HLA-C; do
       read -r -a pair <<< "${by_locus[$locus]:-}"
-      [[ ${#pair[@]} -ge 2 ]] || continue
+      [[ ${#pair[@]} -ge 1 ]] || continue
       id1="$(hla_to_polysolver_id "${pair[0]}")"
-      id2="$(hla_to_polysolver_id "${pair[1]}")"
+      # Homozygous consensus (one allele/locus): duplicate for Polysolver/LOHHLA pair format.
+      if [[ ${#pair[@]} -ge 2 ]]; then
+        id2="$(hla_to_polysolver_id "${pair[1]}")"
+      else
+        id2="${id1}"
+      fi
       printf '%s\t%s\t%s\n' "${locus}" "${id1}" "${id2}"
     done
   } > "${WINNERS}"
@@ -221,12 +318,24 @@ write_winners_from_hla_file() {
 }
 
 ensure_polysolver() {
+  local resolved_pshome="${PSHOME}"
   [[ -f "${PSHOME}/scripts/config.local.bash" ]] || {
     echo "ERROR: Polysolver not configured. Run: bash scripts/install_polysolver.sh" >&2
     exit 1
   }
   # shellcheck source=/dev/null
   source "${PSHOME}/scripts/config.local.bash"
+  # Licensed asset bundles are commonly copied between machines. Their
+  # generated config.local.bash may still contain the source machine's
+  # absolute PSHOME, so the explicitly resolved deployment path must win.
+  PSHOME="${resolved_pshome}"
+  SAMTOOLS_DIR="${PSHOME}/binaries"
+  NOVOALIGN_DIR="${PSHOME}/binaries"
+  GATK_DIR="${PSHOME}/binaries"
+  MUTECT_DIR="${PSHOME}/binaries"
+  STRELKA_DIR="${PSHOME}/binaries"
+  TMP_DIR="${PSHOME}/sachet"
+  export PSHOME SAMTOOLS_DIR NOVOALIGN_DIR GATK_DIR MUTECT_DIR STRELKA_DIR TMP_DIR
   export PATH="${NEOAG_CONDA_BASE}/envs/${NEOAG_TOOLS_ENV:-neoag-tools}/bin:${PSHOME}/binaries:${PSHOME}/scripts:${PATH}"
   if [[ -f "${NOVOALIGN_LICENSE_FILE:-}" ]]; then
     if [[ "$(readlink -f "${NOVOALIGN_LICENSE_FILE}")" != "$(readlink -f "${NOVO_DIR}/novoalign.lic" 2>/dev/null || true)" ]]; then
@@ -302,6 +411,69 @@ run_build_hla_fasta() {
   echo "==> HLAfastaLoc ready: ${PATIENT_HLA_FASTA}"
 }
 
+prepare_copynum_for_lohhla() {
+  local source="$1"
+  [[ "${source}" != "FALSE" ]] || {
+    printf '%s\n' "FALSE"
+    return 0
+  }
+  [[ -s "${source}" ]] || {
+    echo "ERROR: COPYNUM_LOC is not a non-empty table: ${source}" >&2
+    return 1
+  }
+
+  local out_dir="${LOHHLA_NAS_ROOT}/copy_number"
+  local staged="${out_dir}/$(basename "${source}").lohhla.tsv"
+  mkdir -p "${out_dir}"
+
+  # LOHHLA resolves copy-number rows using an internal sample label.  Preserve
+  # all supplied rows, then add only unambiguous aliases for the current case.
+  # This prevents a harmless tumor-BAM suffix from silently disabling integer
+  # copy-number inference, without borrowing values from another sample.
+  awk -F '\t' -v OFS='\t' \
+    -v patient_id="${PATIENT_ID}" \
+    -v tumor_sample="${TUMOR_SAMPLE}" \
+    -v tumor_bam="$(basename "${TUMOR_BAM}" .bam)" '
+    NR == 1 { header = $0; next }
+    {
+      order[++count] = $1
+      row[$1] = $0
+    }
+    END {
+      if (count == 0) {
+        print "ERROR: copy-number table has no data rows" > "/dev/stderr"
+        exit 2
+      }
+      print header
+      for (i = 1; i <= count; i++) print row[order[i]]
+
+      n = split(patient_id SUBSEP tumor_sample SUBSEP tumor_bam, aliases, SUBSEP)
+      selected = ""
+      for (i = 1; i <= n; i++) {
+        if (aliases[i] in row) {
+          selected = aliases[i]
+          break
+        }
+      }
+      if (selected == "") {
+        if (count != 1) {
+          print "ERROR: copy-number table has multiple rows but none match patient/tumor identifiers" > "/dev/stderr"
+          exit 3
+        }
+        selected = order[1]
+      }
+      for (i = 1; i <= n; i++) {
+        alias = aliases[i]
+        if (alias == "" || alias in row) continue
+        line = row[selected]
+        sub(/^[^\t]*/, alias, line)
+        print line
+      }
+    }
+  ' "${source}" > "${staged}"
+  printf '%s\n' "${staged}"
+}
+
 run_lohhla() {
   resolve_lohhla_home
   ensure_bam_index "${TUMOR_BAM}"
@@ -339,7 +511,7 @@ run_lohhla() {
     fi
   done
   unset _jhome
-  export PATH="${FUSION_ENV}/bin:${NOVO_DIR}:${PSHOME}/scripts:${GATK_ENV}/bin:${PATH}"
+  export PATH="${FUSION_ENV}/bin:${LOHHLA_BEDTOOLS_DIR}:${NOVO_DIR}:${PSHOME}/scripts:${GATK_ENV}/bin:${PATH}"
   if [[ -n "${JAVA_HOME:-}" ]]; then
     export PATH="${JAVA_HOME}/bin:${PATH}"
   fi
@@ -358,20 +530,35 @@ run_lohhla() {
     # character-to-logical conversion bug in some LOHHLA revisions.
     echo "    reusing flagstat from ${flagstat_dir}"
   fi
-  local lohhla_out_abs winners_abs hla_fasta_abs copynum_abs
+  local bam_dir_abs normal_bam_dir_abs tumor_bam_name normal_bam_name
+  bam_dir_abs="$(cd "$(dirname "${tumor_bam}")" && pwd -P)"
+  normal_bam_dir_abs="$(cd "$(dirname "${normal_bam}")" && pwd -P)"
+  [[ "${bam_dir_abs}" == "${normal_bam_dir_abs}" ]] || {
+    echo "ERROR: LOHHLA requires tumor and normal BAM links in one directory" >&2
+    exit 1
+  }
+  tumor_bam_name="$(basename "${tumor_bam}")"
+  normal_bam_name="$(basename "${normal_bam}")"
+  local lohhla_out_abs winners_abs hla_fasta_abs copynum_abs copynum_input
   lohhla_out_abs="$(mkdir -p "${LOHHLA_OUT}" && cd "${LOHHLA_OUT}" && pwd -P)"
   winners_abs="$(cd "$(dirname "${WINNERS}")" && pwd -P)/$(basename "${WINNERS}")"
   hla_fasta_abs="$(cd "$(dirname "${PATIENT_HLA_FASTA}")" && pwd -P)/$(basename "${PATIENT_HLA_FASTA}")"
-  if [[ "${COPYNUM_LOC}" == "FALSE" ]]; then
+  copynum_input="$(prepare_copynum_for_lohhla "${COPYNUM_LOC}")"
+  if [[ "${copynum_input}" == "FALSE" ]]; then
     copynum_abs="FALSE"
   else
-    copynum_abs="$(cd "$(dirname "${COPYNUM_LOC}")" && pwd -P)/$(basename "${COPYNUM_LOC}")"
+    copynum_abs="$(cd "$(dirname "${copynum_input}")" && pwd -P)/$(basename "${copynum_input}")"
   fi
-  Rscript "${LOHHLA_SCRIPT}" \
+  # LOHHLA later invokes samtools with BAM basenames. Run inside the resolved
+  # common BAM directory so this upstream relative-path behavior remains valid.
+  (
+  cd "${bam_dir_abs}"
+  "${FUSION_ENV}/bin/Rscript" "${LOHHLA_SCRIPT}" \
     --patientId "${PATIENT_ID}" \
     --outputDir "${lohhla_out_abs}" \
-    --normalBAMfile "${normal_bam}" \
-    --tumorBAMfile "${tumor_bam}" \
+    --BAMDir "${bam_dir_abs}" \
+    --normalBAMfile "${normal_bam_name}" \
+    --tumorBAMfile "${tumor_bam_name}" \
     --hlaPath "${winners_abs}" \
     --HLAfastaLoc "${hla_fasta_abs}" \
     --CopyNumLoc "${copynum_abs}" \
@@ -383,8 +570,10 @@ run_lohhla() {
     --minCoverageFilter "${MIN_COVERAGE}" \
     --cleanUp FALSE \
     --gatkDir "${LOHHLA_GATK_RUNTIME_DIR}" \
+    --LOHHLA_loc "${LOHHLA_HOME}" \
     --novoDir "${NOVO_DIR}" \
     --HLAexonLoc "${HLA_EXON_LOC}"
+  )
 
   echo ""
   echo "==> Done. Key outputs:"

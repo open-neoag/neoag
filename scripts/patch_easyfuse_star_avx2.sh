@@ -17,8 +17,22 @@ if [[ -n "${NEOAG_CONDA_BASE:-}" && ! -x "${STAR_SRC}/STAR-avx2" && -x "${NEOAG_
   STAR_SRC="${NEOAG_CONDA_BASE}/envs/neoag-fusion/bin"
 fi
 
-[[ -x "${STAR_SRC}/STAR-avx2" ]] || {
-  echo "ERROR: STAR-avx2 source not found (tried ${STAR_SRC})" >&2
+# Recent portable deployments may only carry the exact monolithic STAR binary
+# required by FusionCatcher/STAR-Fusion. It is a valid source when the legacy
+# SIMD dispatch bundle is absent.
+if [[ ! -x "${STAR_SRC}/STAR-avx2" && ! -x "${STAR_SRC}/STAR" && -n "${NEOAG_CONDA_BASE:-}" ]]; then
+  shopt -s nullglob
+  for candidate in "${NEOAG_CONDA_BASE}"/pkgs/star-2.7.2b-*/bin; do
+    if [[ -x "${candidate}/STAR" ]]; then
+      STAR_SRC="${candidate}"
+      break
+    fi
+  done
+  shopt -u nullglob
+fi
+
+[[ -x "${STAR_SRC}/STAR-avx2" || -x "${STAR_SRC}/STAR" ]] || {
+  echo "ERROR: compatible STAR source not found (tried ${STAR_SRC})" >&2
   exit 1
 }
 
@@ -70,6 +84,12 @@ patch_prefix() {
   local prefix="$1"
   [[ -d "${prefix}/bin" ]] || return 0
   [[ -x "${prefix}/bin/STAR" ]] || return 0
+
+  # FusionCatcher 1.33 hard-requires STAR 2.7.2b; do not replace with neoag-fusion 2.7.11b.
+  if [[ -x "${prefix}/bin/fusioncatcher" || -f "${prefix}/etc/configuration.cfg" ]]; then
+    echo "    skip fusioncatcher env ${prefix}"
+    return 0
+  fi
 
   if [[ -f "${prefix}/bin/STAR.orig-bioconda" ]]; then
     echo "    already patched ${prefix}"

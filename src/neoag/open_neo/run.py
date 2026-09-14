@@ -41,6 +41,7 @@ from .routing import (
     write_routing_outputs,
 )
 from .tool_consensus import build_tool_consensus, enrich_all_tool_results
+from .output_layout import materialize_output_view
 from .state import (
     RunLayout,
     audit,
@@ -230,6 +231,18 @@ def _run_production_case_wrapper(args: dict[str, Any], routing: RoutingResult, l
         "asset_root": "--asset-root",
         "reference_fasta": "--reference-fasta",
         "gencode_gtf": "--gencode-gtf",
+        "tumor_dna_bam": "--tumor-dna-bam",
+        "normal_dna_bam": "--normal-dna-bam",
+        "tumor_sample_id": "--tumor-sample-name",
+        "normal_sample_id": "--normal-sample-name",
+        "assay_type": "--assay-type",
+        "capture_bed": "--capture-bed",
+        "sv_vcf": "--sv-vcf",
+        "bam_matcher_loci": "--bam-matcher-loci",
+        "sv_threads": "--sv-threads",
+        "sv_memory_gb": "--sv-memory-gb",
+        "sv_nextflow_config": "--sv-nextflow-config",
+        "sv_nextflow_profile": "--sv-nextflow-profile",
         "sequenza": "--sequenza",
         "purple": "--purple",
         "expression_tsv": "--expression",
@@ -261,6 +274,10 @@ def _run_production_case_wrapper(args: dict[str, Any], routing: RoutingResult, l
         if key == "profile" and str(value) == "default":
             continue
         command += [flag, _path_arg(value)]
+    if bool(routing.inputs.get("skip_bam_matcher", args.get("skip_bam_matcher", False))):
+        command.append("--skip-bam-matcher")
+    if bool(routing.inputs.get("skip_dna_sv", args.get("skip_dna_sv", False))):
+        command.append("--skip-dna-sv")
     if routing.inputs.get("rna_fastq1") or routing.inputs.get("rna_fastq2"):
         command += ["--rna-fastq1", _path_arg(routing.inputs.get("rna_fastq1")), "--rna-fastq2", _path_arg(routing.inputs.get("rna_fastq2"))]
     for caller_root in routing.inputs.get("fusion_caller_root") or []:
@@ -319,6 +336,8 @@ def _register_production_tool_outputs(inputs: dict[str, Any], production_result:
     tool_results = inputs.setdefault("tool_results", {})
     stage_domains = {
         "sample_identity_bam_matcher": ("sample_identity", "bam-matcher"),
+        "dna_sv_discovery": ("dna_sv", "multi-caller"),
+        "fusion_dna_sv_link": ("fusion", "dna-sv-link"),
         "hla_optitype": ("hla_typing", "optitype"),
         "hla_hla_la": ("hla_typing", "hla-la"),
         "hla_spechla": ("hla_typing", "spechla"),
@@ -749,13 +768,21 @@ def run_open_neo(args: dict[str, Any]) -> dict[str, Any]:
     result.steps[-1].outputs = artifacts
     result.outputs.update(artifacts)
     evidence_for_consensus = artifacts.get("consensus_peptides") or artifacts.get("comprehensive_evidence")
-    consensus_outputs = build_tool_consensus(routing.inputs, layout.pipeline / "tool_consensus", evidence_path=evidence_for_consensus)
+    consensus_inputs = dict(routing.inputs)
+    fusion_consensus_candidates = (
+        result_root / "pipeline/production/branches/fusion/consensus/fusion_consensus.tsv",
+        result_root / "production/branches/fusion/consensus/fusion_consensus.tsv",
+        result_root / "branches/fusion/consensus/fusion_consensus.tsv",
+        result_root / "branches/fusion/dna_sv_linked/fusion_consensus.tsv",
+        result_root / "branches/fusion/intermediates/fusion_consensus.tsv",
+    )
+    authoritative_fusion = next((path for path in fusion_consensus_candidates if path.is_file() and path.stat().st_size > 0), None)
+    if authoritative_fusion:
+        consensus_inputs["fusion_consensus_tsv"] = str(authoritative_fusion)
+    consensus_outputs = build_tool_consensus(consensus_inputs, layout.pipeline / "tool_consensus", evidence_path=evidence_for_consensus)
     result.outputs.update({f"consensus_{key.removesuffix('.tsv')}": value for key, value in consensus_outputs.items()})
     if artifacts.get("all_tool_results"):
         enrich_all_tool_results(artifacts["all_tool_results"], consensus_outputs["tool_consensus_summary.tsv"])
-    output_manifest = write_named_output_manifest(result.outputs, layout.root / "output_manifest.json")
-    result.outputs["output_manifest"] = str(output_manifest)
-
     macro_run_manifest = {
         "schema_version": "open-neo-run-manifest-v1",
         "run_id": result.run_id,
@@ -772,6 +799,23 @@ def run_open_neo(args: dict[str, Any]) -> dict[str, Any]:
     }
     write_json(layout.run_manifest, macro_run_manifest)
     result.outputs["run_manifest"] = str(layout.run_manifest)
+    output_manifest = write_named_output_manifest(result.outputs, layout.root / "output_manifest.json")
+    result.outputs["output_manifest"] = str(output_manifest)
+    result.outputs.update(materialize_output_view(
+        result_root,
+        source_root=result_root,
+        artifacts=result.outputs,
+        layout_paths={
+            "macro_manifests": layout.manifests,
+            "macro_input_qc": layout.input_qc,
+            "macro_logs": layout.logs,
+            "macro_run_manifest": layout.run_manifest,
+            "macro_output_manifest": output_manifest,
+            "macro_audit_log": layout.audit_log,
+        },
+        producer="open-neo-run",
+    ))
+    write_named_output_manifest(result.outputs, layout.root / "output_manifest.json")
     final_status = "PASS_WITH_WARNINGS" if result.warnings or routing.missing or (production_result and production_result.status == "LOW_CONFIDENCE") else "PASS"
     result.provenance = {"python": platform.python_version(), "project_root": str(Path(args.get("project_root") or ".").resolve()), "result_root": str(result_root.resolve())}
     update_case_state(layout, case_id=case_id, current_intent="run", status=final_status, result_root=str(result_root.resolve()), artifacts=artifacts)

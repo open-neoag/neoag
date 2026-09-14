@@ -88,6 +88,10 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--reference-root")
     install.add_argument("--licensed-root")
     install.add_argument(
+        "--spechla-source",
+        help="Complete official SpecHLA source checkout; required when the staged image contains only runtime dependencies",
+    )
+    install.add_argument(
         "--gateway-url",
         help="Optional NeoAg Gateway URL to validate before full execute runs",
     )
@@ -166,6 +170,13 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--splice-junction-tsv")
     run.add_argument("--sv-vcf", action="append")
     run.add_argument("--capture-bed")
+    run.add_argument("--bam-matcher-loci")
+    run.add_argument("--skip-bam-matcher", action="store_true")
+    run.add_argument("--skip-dna-sv", action="store_true")
+    run.add_argument("--sv-threads", type=int, default=8)
+    run.add_argument("--sv-memory-gb", type=float, default=48.0)
+    run.add_argument("--sv-nextflow-config")
+    run.add_argument("--sv-nextflow-profile")
     run.add_argument("--peptide-csv")
     run.add_argument("--raw-events")
     run.add_argument("--raw-peptides")

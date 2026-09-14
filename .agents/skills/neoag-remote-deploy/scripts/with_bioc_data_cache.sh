@@ -38,6 +38,68 @@ PKG_CACHE="$CACHE_ROOT/conda_pkgs_bioc"
 DATA_CACHE="$CACHE_ROOT/bioconductor"
 mkdir -p "$PKG_CACHE" "$DATA_CACHE"
 
+find_environment_file() {
+  local previous="" arg
+  for arg in "$@"; do
+    if [[ "$previous" == "-f" || "$previous" == "--file" ]]; then
+      printf '%s\n' "$arg"
+      return 0
+    fi
+    case "$arg" in
+      -f|--file) previous="$arg" ;;
+      --file=*) printf '%s\n' "${arg#*=}"; return 0 ;;
+      *) previous="" ;;
+    esac
+  done
+}
+
+find_registered_meta_dir() {
+  local candidate
+  while IFS= read -r candidate; do
+    [[ -f "$candidate/info/repodata_record.json" ]] || continue
+    [[ -f "$candidate/share/bioconductor-data-packages/dataURLs.json" ]] || continue
+    printf '%s\n' "$candidate"
+  done < <(find "$PKG_CACHE" -maxdepth 1 -type d -name 'bioconductor-data-packages-*' | sort)
+}
+
+find_meta_dir_for_key() {
+  local root="$1" candidate json
+  while IFS= read -r candidate; do
+    json="$candidate/share/bioconductor-data-packages/dataURLs.json"
+    [[ -f "$json" ]] || continue
+    if python3 - "$json" "$PACKAGE_KEY" <<'PY' >/dev/null 2>&1
+import json, sys
+raise SystemExit(0 if sys.argv[2] in json.load(open(sys.argv[1], encoding="utf-8")) else 1)
+PY
+    then
+      printf '%s\n' "$candidate"
+    fi
+  done < <(find "$root" -maxdepth 1 -type d -name 'bioconductor-data-packages-*' | sort)
+}
+
+prefetch_transaction() {
+  local environment_file
+  environment_file="$(find_environment_file "$@" || true)"
+  echo "==> Populate Conda's registered package cache before patching post-link support"
+  if [[ -n "$environment_file" && -f "$environment_file" ]]; then
+    CONDA_PKGS_DIRS="$PKG_CACHE" "$CONDA_BASE/bin/conda" create \
+      --download-only -f "$environment_file" -y
+  else
+    CONDA_PKGS_DIRS="$PKG_CACHE" "$CONDA_BASE/bin/conda" create \
+      --download-only -c bioconda -c conda-forge \
+      bioconductor-data-packages -y
+  fi
+  # Most environment YAMLs depend on a concrete Bioconductor data package but
+  # do not list the URL/MD5 registry package itself. Fetch that small metadata
+  # package explicitly so the cache patch can resolve historical package keys.
+  if [[ -z "$(find_registered_meta_dir | tail -1)" ]]; then
+    echo "==> Register Bioconductor data-package URL metadata"
+    CONDA_PKGS_DIRS="$PKG_CACHE" "$CONDA_BASE/bin/conda" create \
+      --download-only -c bioconda -c conda-forge \
+      bioconductor-data-packages -y
+  fi
+}
+
 curl_supports_retry_all_errors() {
   command -v curl >/dev/null 2>&1 || return 1
   { curl --help all 2>/dev/null || curl --help 2>/dev/null; } | grep -q -- '--retry-all-errors'
@@ -45,7 +107,7 @@ curl_supports_retry_all_errors() {
 
 download_file() {
   local url="$1" destination="$2"
-  local -a curl_args=(-fL --retry 5 --connect-timeout 30)
+  local -a curl_args=(-fL -C - --retry 5 --retry-delay 5 --connect-timeout 30 --speed-time 60 --speed-limit 32768)
   if curl_supports_retry_all_errors; then
     curl_args+=(--retry-all-errors)
   else
@@ -54,30 +116,18 @@ download_file() {
   curl "${curl_args[@]}" -o "$destination" "$url"
 }
 
-META_DIR="$(find "$PKG_CACHE" -maxdepth 1 -type d -name 'bioconductor-data-packages-*' | sort | tail -1)"
+prefetch_transaction "$@"
+META_DIR="$(find_meta_dir_for_key "$PKG_CACHE" | tail -1)"
 if [[ -z "$META_DIR" ]]; then
-  echo "==> Populate isolated Bioconductor metadata cache"
-  mapfile -t CONDA_META < <("$CONDA_BASE/bin/conda" search --json --override-channels \
-    -c bioconda bioconductor-data-packages | "$CONDA_BASE/bin/python" -c '
-import json, sys
-records = json.load(sys.stdin)["bioconductor-data-packages"]
-record = sorted(records, key=lambda x: (x["version"], x.get("build_number", 0)))[-1]
-print(record["fn"])
-print(record.get("url") or record["channel"].rstrip("/") + "/" + record["fn"])
-')
-  META_PACKAGE="$PKG_CACHE/${CONDA_META[0]}"
-  if [[ ! -s "$META_PACKAGE" ]]; then
-    download_file "${CONDA_META[1]}" "$META_PACKAGE"
+  SOURCE_META="$(find_meta_dir_for_key "$CONDA_BASE/pkgs" | tail -1)"
+  if [[ -n "$SOURCE_META" ]]; then
+    echo "==> Import matching Bioconductor URL metadata: $SOURCE_META"
+    rm -rf "$PKG_CACHE/$(basename "$SOURCE_META")"
+    cp -a "$SOURCE_META" "$PKG_CACHE/"
+    META_DIR="$PKG_CACHE/$(basename "$SOURCE_META")"
   fi
-  META_DIR="$PKG_CACHE/${CONDA_META[0]%.conda}"
-  rm -rf "$META_DIR"
-  "$CONDA_BASE/bin/python" - "$META_PACKAGE" "$META_DIR" <<'PY'
-import sys
-from conda_package_handling.api import extract
-extract(sys.argv[1], dest_dir=sys.argv[2])
-PY
 fi
-[[ -n "$META_DIR" ]] || { echo "ERROR: bioconductor-data-packages metadata was not extracted" >&2; exit 3; }
+[[ -n "$META_DIR" ]] || { echo "ERROR: bioconductor-data-packages was not registered in the Conda package cache" >&2; exit 3; }
 JSON="$META_DIR/share/bioconductor-data-packages/dataURLs.json"
 HOOK="$META_DIR/bin/installBiocDataPackage.sh"
 PATHS="$META_DIR/info/paths.json"
@@ -105,16 +155,29 @@ if ! echo "$MD5  $TARBALL" | md5sum -c - >/dev/null 2>&1; then
   fi
 fi
 if ! echo "$MD5  $TARBALL" | md5sum -c - >/dev/null 2>&1; then
-  for url in "${META[@]:2}"; do
-    echo "==> Download $FN from $url"
-    if command -v aria2c >/dev/null 2>&1; then
-      aria2c -x 1 -s 1 --file-allocation=none --allow-overwrite=true \
-        --dir "$DATA_CACHE" --out "$FN" "$url" || true
-    else
-      download_file "$url" "$TARBALL" || true
-    fi
-    echo "$MD5  $TARBALL" | md5sum -c - >/dev/null 2>&1 && break
-    rm -f "$TARBALL"
+  for pass in 1 2; do
+    for url in "${META[@]:2}"; do
+      echo "==> Download $FN from $url (pass $pass)"
+      if command -v aria2c >/dev/null 2>&1; then
+        aria_args=(--continue=true -x 1 -s 1 --file-allocation=none
+          --allow-overwrite=true --max-tries=5 --retry-wait=5
+          --connect-timeout=30 --timeout=60)
+        # The first pass rotates away from an unusually slow mirror. The
+        # clean second pass accepts a slow source so installations still work
+        # when it is the only reachable archive.
+        [[ "$pass" == "1" ]] && aria_args+=(--lowest-speed-limit=32K)
+        aria2c "${aria_args[@]}" --dir "$DATA_CACHE" --out "$FN" "$url" || true
+      else
+        download_file "$url" "$TARBALL" || true
+      fi
+      echo "$MD5  $TARBALL" | md5sum -c - >/dev/null 2>&1 && break 2
+      # Preserve the partial payload so the next mirror can resume it, but
+      # discard aria2's URI-specific control file before changing mirrors.
+      rm -f "$TARBALL.aria2"
+    done
+    # A mismatched partial may not be resumable across mirrors. Retry the
+    # complete mirror list once from a clean payload before declaring failure.
+    rm -f "$TARBALL" "$TARBALL.aria2"
   done
 fi
 echo "$MD5  $TARBALL" | md5sum -c - >/dev/null 2>&1 || {
@@ -171,4 +234,8 @@ with open(paths_file, "w", encoding="utf-8") as handle:
 PY
 
 echo "==> Run conda transaction with cached $FN"
-CONDA_PKGS_DIRS="$PKG_CACHE" NEOAG_BIOC_DATA_CACHE_DIR="$DATA_CACHE" "$@"
+# The prefetch populated every package required by the YAML. Offline mode
+# prevents Conda from replacing the patched, registered cache entry before
+# the post-link script consumes the verified local Bioconductor tarball.
+CONDA_PKGS_DIRS="$PKG_CACHE" CONDA_OFFLINE=true \
+  NEOAG_BIOC_DATA_CACHE_DIR="$DATA_CACHE" "$@"

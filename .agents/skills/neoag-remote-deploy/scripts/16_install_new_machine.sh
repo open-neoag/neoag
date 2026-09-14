@@ -8,6 +8,7 @@ REFERENCE_ROOT="${NEOAG_REFERENCE_ROOT:-$DEPLOY_ROOT/refs}"
 LICENSED_ROOT="${NEOAG_LICENSED_ROOT:-$DEPLOY_ROOT/licensed_tools}"
 CONDA_BASE=""
 CONDA_PKGS_SOURCE="${NEOAG_CONDA_PKGS_SOURCE:-}"
+SPECHLA_SOURCE="${NEOAG_SPECHLA_SOURCE:-}"
 OUTDIR="work/agent_deploy/new_machine_install"
 ASSET_MANIFEST="configs/assets/production_assets.tsv"
 REFERENCE_MANIFEST="configs/references/reference_manifest.yaml"
@@ -57,6 +58,7 @@ Common options:
   --licensed-root DIR         Licensed tool root (default: NEOAG_LICENSED_ROOT or /opt/neoag/licensed_tools)
   --conda-base DIR            Miniforge/conda base (default: tools-root/miniforge3)
   --conda-pkgs-source DIR     Pre-populated Conda package cache for offline-first installation
+  --spechla-source DIR        Complete official SpecHLA checkout for the SpecHLA capability
   --outdir DIR                Work/report directory
   --asset-manifest FILE       Large asset manifest (default: configs/assets/production_assets.tsv)
   --reference-manifest FILE   YAML reference manifest verified after asset sync
@@ -80,8 +82,7 @@ Tool group shortcuts:
                               EasyFuse family), BAM-matcher, and CPU torch (BigMHC +
                               runtime validate). ASCAT/PyClone remains optional
                               (--add-tool-group --ascat-pyclone).
-  --all-open                  Pass --all-open to 13_install_readme_tools.sh; includes required NetMHCstabpan and NetChop installers
-  --add-tool-group FLAG       Add any 13_install_readme_tools.sh group flag, e.g. --vep
+  --all-open                  Install the complete supported open production tool set
 
 Asset / validation toggles:
   --no-sync-assets            Do not sync asset manifest
@@ -98,9 +99,6 @@ Real VCF smoke:
   --real-vcf-hla-file FILE    File containing HLA alleles
   --real-vcf-smoke-top-n N    Unique peptides for smoke test (default: 1)
   --skip-real-vcf-mhcflurry   Temporary fallback if MHCflurry is broken
-
-Pass-through:
-  --                          Remaining args are passed to 13_install_readme_tools.sh.
 
 Examples:
   bash .agents/skills/neoag-remote-deploy/scripts/16_install_new_machine.sh \
@@ -128,6 +126,7 @@ while [[ $# -gt 0 ]]; do
     --licensed-root) LICENSED_ROOT="$2"; shift 2 ;;
     --conda-base) CONDA_BASE="$2"; shift 2 ;;
     --conda-pkgs-source) CONDA_PKGS_SOURCE="$2"; shift 2 ;;
+    --spechla-source) SPECHLA_SOURCE="$2"; shift 2 ;;
     --outdir) OUTDIR="$2"; shift 2 ;;
     --asset-manifest) ASSET_MANIFEST="$2"; shift 2 ;;
     --reference-manifest) REFERENCE_MANIFEST="$2"; shift 2 ;;
@@ -148,6 +147,8 @@ while [[ $# -gt 0 ]]; do
     --standard) INSTALL_TOOL_GROUPS=(--core-env --vep --gatk --immunogenicity --netmhcstabpan --optitype --facets --splice --lohhla --fusion --bam-matcher --install-torch); shift ;;
     --all-open) INSTALL_TOOL_GROUPS=(--all-open); shift ;;
     --all) echo "ERROR: --all has been retired for Skill1; use --all-open" >&2; exit 2 ;;
+    # Backward-compatible internal forwarding only. New user-facing commands
+    # should use open-neo install-check or the named 16 options above.
     --add-tool-group) EXTRA_INSTALL_ARGS+=("$2"); shift 2 ;;
     --no-sync-assets) SYNC_ASSETS=0; shift ;;
     --no-verify) RUN_VERIFY=0; shift ;;
@@ -201,6 +202,7 @@ install_args=(
 )
 [[ "$ALLOW_DOWNLOAD" == "1" ]] && install_args+=(--allow-download)
 [[ -n "$CONDA_PKGS_SOURCE" ]] && install_args+=(--conda-pkgs-source "$CONDA_PKGS_SOURCE")
+[[ -n "$SPECHLA_SOURCE" ]] && install_args+=(--spechla-source "$SPECHLA_SOURCE")
 [[ "$EXECUTE" == "1" ]] && install_args+=(--execute)
 if [[ "$INSTALL_CLAUDE_CODE" == "1" ]]; then
   install_args+=(--claude-code --claude-code-channel "$CLAUDE_CODE_CHANNEL" --claude-code-installer-url "$CLAUDE_CODE_INSTALLER_URL")
@@ -264,6 +266,7 @@ fi
   echo "Reference manifest: \`$REFERENCE_MANIFEST\`"
   echo "Asset source host: \`${ASSET_SOURCE_HOST:-none}\`"
   echo "Shared asset root: \`${SHARED_ASSET_ROOT:-none}\`"
+  echo "SpecHLA source: \`${SPECHLA_SOURCE:-none}\`"
   echo "Claude Code: \`$INSTALL_CLAUDE_CODE\`"
   [[ "$INSTALL_CLAUDE_CODE" == "1" ]] && echo "Claude Code channel/version: \`$CLAUDE_CODE_CHANNEL\`"
   echo "Log: \`$LOG\`"

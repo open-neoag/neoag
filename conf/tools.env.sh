@@ -54,15 +54,9 @@ else
   export NEOAG_VEP_BIN="${NEOAG_TOOLS_ROOT}/bin/vep-neoag"
 fi
 # VEP cache root (must contain homo_sapiens/<version>_GRCh38/, not the release dir itself).
-export NEOAG_VEP_CACHE="${NEOAG_TOOLS_ROOT}/data/vep"
-if [[ ! -d "${NEOAG_VEP_CACHE}/homo_sapiens" && -d "${NEOAG_TOOLS_ROOT}/../neoag_event_pipeline_artifact_quarantine_20260622_091158/data/vep/homo_sapiens" ]]; then
-  export NEOAG_VEP_CACHE="${NEOAG_TOOLS_ROOT}/../neoag_event_pipeline_artifact_quarantine_20260622_091158/data/vep"
-fi
+export NEOAG_VEP_CACHE="${NEOAG_VEP_CACHE:-${NEOAG_TOOLS_ROOT}/data/vep}"
 export NEOAG_VEP_CACHE_VERSION="105"
-export NEOAG_VEP_PLUGINS="${NEOAG_TOOLS_ROOT}/work/vep_plugins"
-if [[ ! -f "${NEOAG_VEP_PLUGINS}/Wildtype.pm" && -f "${NEOAG_TOOLS_ROOT}/../neoag_event_pipeline_artifact_quarantine_20260622_091158/work/vep_plugins/Wildtype.pm" ]]; then
-  export NEOAG_VEP_PLUGINS="${NEOAG_TOOLS_ROOT}/../neoag_event_pipeline_artifact_quarantine_20260622_091158/work/vep_plugins"
-fi
+export NEOAG_VEP_PLUGINS="${NEOAG_VEP_PLUGINS:-${NEOAG_TOOLS_ROOT}/work/vep_plugins}"
 export NEOAG_REFERENCE_FASTA="${NEOAG_TOOLS_ROOT}/data/ref/hg38/Homo_sapiens_assembly38.fasta"
 export SEQUENZA_FASTA="${SEQUENZA_FASTA:-${NEOAG_TOOLS_ROOT}/data/sequenza/reference/GRCh38.primary_assembly.chr.fa}"
 export SEQUENZA_GC_WIG="${SEQUENZA_GC_WIG:-${NEOAG_TOOLS_ROOT}/data/sequenza/reference/Homo_sapiens.GRCh38.dna.primary_assembly.chr.gc50.wig.gz}"
@@ -70,10 +64,24 @@ export SEQUENZA_GC_WIG="${SEQUENZA_GC_WIG:-${NEOAG_TOOLS_ROOT}/data/sequenza/ref
 # Ensembl GRCh38 reference proteome (optional; set in conf/tools.env.local.sh)
 export NEOAG_NORMAL_PROTEOME_FASTA="${NEOAG_NORMAL_PROTEOME_FASTA:-}"
 
-# DeepImmuno-CNN (optional immunogenicity; 9/10-mer peptide–HLA pairs)
-export DEEPIMMUNO_DIR="${NEOAG_TOOLS_ROOT}/tools/DeepImmuno"
-
 NEOAG_TOOL_QUARANTINE="${NEOAG_TOOL_QUARANTINE:-}"
+NEOAG_PREDICTOR_DEPS="${NEOAG_PREDICTOR_DEPS:-${NEOAG_TOOL_QUARANTINE}}"
+
+# DeepImmuno-CNN (optional immunogenicity; 9/10-mer peptide–HLA pairs).
+# Prefer a deployed tool, then a shared predictor tree supplied by Skill 1/2.
+export DEEPIMMUNO_DIR="${DEEPIMMUNO_DIR:-${NEOAG_TOOLS_ROOT}/tools/DeepImmuno}"
+for _neoag_deepimmuno_candidate in \
+  "${NEOAG_PREDICTOR_DEPS:+${NEOAG_PREDICTOR_DEPS}/DeepImmuno}" \
+  "${NEOAG_ASSET_ROOT:+${NEOAG_ASSET_ROOT}/data/predictors/DeepImmuno}"; do
+  if [[ ! -f "${DEEPIMMUNO_DIR}/deepimmuno-cnn.py" && -n "${_neoag_deepimmuno_candidate}" && -f "${_neoag_deepimmuno_candidate}/deepimmuno-cnn.py" ]]; then
+    export DEEPIMMUNO_DIR="${_neoag_deepimmuno_candidate}"
+  fi
+done
+unset _neoag_deepimmuno_candidate
+export DEEPIMMUNO_PYTHON="${DEEPIMMUNO_PYTHON:-${NEOAG_CONDA_BASE}/envs/neoag-tools/bin/python}"
+if [[ ! -x "${DEEPIMMUNO_PYTHON}" ]]; then
+  export DEEPIMMUNO_PYTHON="${BIGMHC_PYTHON:-${NEOAG_CONDA_BASE}/envs/neoag-tools/bin/python}"
+fi
 
 # BigMHC_IM (repo ~5GB incl. models under models/bat*/im/)
 export BIGMHC_DIR="${NEOAG_TOOLS_ROOT}/tools/bigmhc"
@@ -87,9 +95,14 @@ if [[ ! -x "${BIGMHC_PYTHON}" ]]; then
     export BIGMHC_PYTHON="${HOME}/miniforge3/envs/neoag-tools/bin/python"
   fi
 fi
-if [[ ! -f "${BIGMHC_DIR}/src/predict.py" && -n "${NEOAG_TOOL_QUARANTINE}" && -f "${NEOAG_TOOL_QUARANTINE}/bigmhc/src/predict.py" ]]; then
-  export BIGMHC_DIR="${NEOAG_TOOL_QUARANTINE}/bigmhc"
-fi
+for _neoag_bigmhc_candidate in \
+  "${NEOAG_PREDICTOR_DEPS:+${NEOAG_PREDICTOR_DEPS}/bigmhc}" \
+  "${NEOAG_ASSET_ROOT:+${NEOAG_ASSET_ROOT}/data/predictors/bigmhc}"; do
+  if [[ ! -f "${BIGMHC_DIR}/src/predict.py" && -n "${_neoag_bigmhc_candidate}" && -f "${_neoag_bigmhc_candidate}/src/predict.py" ]]; then
+    export BIGMHC_DIR="${_neoag_bigmhc_candidate}"
+  fi
+done
+unset _neoag_bigmhc_candidate
 
 # PRIME + MixMHCpred (immunogenicity)
 export PRIME_HOME="${NEOAG_TOOLS_ROOT}/tools/prime"
@@ -129,11 +142,37 @@ fi
 
 # LOHHLA / FACETS / Nextflow
 export LOHHLA_HOME="${LOHHLA_HOME:-${NEOAG_TOOLS_ROOT}/tools/lohhla}"
-if [[ ! -f "${LOHHLA_HOME}/LOHHLAscript.R" && -f "${NEOAG_TOOLS_ROOT}/../neoag_event_pipeline_artifact_quarantine_20260622_091158/tools/lohhla/LOHHLAscript.R" ]]; then
-  export LOHHLA_HOME="${NEOAG_TOOLS_ROOT}/../neoag_event_pipeline_artifact_quarantine_20260622_091158/tools/lohhla"
-fi
 export POLYSOLVER_HOME="${POLYSOLVER_HOME:-}"
 export NOVOALIGN_LICENSE_FILE="${NOVOALIGN_LICENSE_FILE:-}"
+if [[ -z "${POLYSOLVER_HOME}" ]]; then
+  for _neoag_polysolver_candidate in \
+    "${NEOAG_LICENSED_ROOT:+${NEOAG_LICENSED_ROOT}/polysolver}" \
+    "${NEOAG_ASSET_ROOT:+${NEOAG_ASSET_ROOT}/data/lohhla/polysolver}" \
+    "${NEOAG_ASSET_ROOT:+${NEOAG_ASSET_ROOT}/data/polysolver}" \
+    "${NEOAG_PUBLIC_ASSET_ROOT:+${NEOAG_PUBLIC_ASSET_ROOT}/data/lohhla/polysolver}" \
+    "${NEOAG_TOOLS_ROOT}/tools/polysolver"; do
+    if [[ -n "${_neoag_polysolver_candidate}" \
+      && -x "${_neoag_polysolver_candidate}/scripts/shell_call_hla_type" \
+      && -s "${_neoag_polysolver_candidate}/data/abc_complete.fasta" ]]; then
+      export POLYSOLVER_HOME="${_neoag_polysolver_candidate}"
+      break
+    fi
+  done
+  unset _neoag_polysolver_candidate
+fi
+if [[ -z "${NOVOALIGN_LICENSE_FILE}" ]]; then
+  for _neoag_novoalign_license in \
+    "${NEOAG_LICENSED_ROOT:+${NEOAG_LICENSED_ROOT}/novoalign.lic}" \
+    "${NEOAG_ASSET_ROOT:+${NEOAG_ASSET_ROOT}/data/lohhla/novoalign.lic}" \
+    "${POLYSOLVER_HOME:+${POLYSOLVER_HOME}/license/novoalign.lic}" \
+    "${POLYSOLVER_HOME:+${POLYSOLVER_HOME}/binaries/novoalign.lic}"; do
+    if [[ -n "${_neoag_novoalign_license}" && -s "${_neoag_novoalign_license}" ]]; then
+      export NOVOALIGN_LICENSE_FILE="${_neoag_novoalign_license}"
+      break
+    fi
+  done
+  unset _neoag_novoalign_license
+fi
 export FACETS_HOME="${NEOAG_TOOLS_ROOT}/bin"
 if [[ ! -x "${FACETS_HOME}/runFACETS.R" ]]; then
   export FACETS_HOME="${NEOAG_TOOLS_ROOT}/tools/facets"
@@ -225,7 +264,8 @@ fi
 if [[ -n "${OPTITYPE_ENV:-}" && -x "${OPTITYPE_ENV}/bin/optitype" ]]; then
   export OPTITYPE_BIN="${OPTITYPE_ENV}/bin/optitype"
   export OPTITYPE_REFERENCE="${OPTITYPE_ENV}/share/optitype/data"
-  export PATH="${OPTITYPE_ENV}/bin:${PATH}"
+  # Do NOT prepend OPTITYPE_ENV/bin to PATH: its `perl` shadows neoag-vep's
+  # `#!/usr/bin/env perl` and breaks VEP (Can't locate DBI.pm). Call via OPTITYPE_BIN.
 fi
 
 # NetChop 3.1d
@@ -240,8 +280,15 @@ elif [[ -d "${NEOAG_TOOLS_ROOT}/bin" ]]; then
 fi
 
 export NEOAG_SPLICEMUTR_ENV="${NEOAG_SPLICEMUTR_ENV:-neoag-splicemutr}"
+export NEOAG_SPLICEMUTR_ENV_PREFIX="${NEOAG_SPLICEMUTR_ENV_PREFIX:-${NEOAG_CONDA_BASE}/envs/${NEOAG_SPLICEMUTR_ENV}}"
 export NEOAG_SPLICEMUTR_HOME="${NEOAG_SPLICEMUTR_HOME:-${NEOAG_TOOLS_ROOT}/tools/SpliceMutr}"
 export NEOAG_SPLICEMUTR_BIN="${NEOAG_SPLICEMUTR_BIN:-${NEOAG_TOOLS_ROOT}/bin/splicemutr-neoag}"
 export SPLICEMUTR_WORKFLOW="${SPLICEMUTR_WORKFLOW:-${NEOAG_SPLICEMUTR_HOME}/simulation/running_splicemutr/run_splicemutr.smk}"
 
 export NEOAG_ALTANALYZE_IMAGE="${NEOAG_ALTANALYZE_IMAGE:-neoag-altanalyze:snaf}"
+
+# SNAF must run in its dedicated legacy-compatible environment. Keep the
+# executable explicit so unrelated Python environments earlier in PATH cannot
+# shadow it during Gateway execution.
+export NEOAG_SNAF_ENV="${NEOAG_SNAF_ENV:-neoag-snaf}"
+export SNAF_PYTHON="${SNAF_PYTHON:-${NEOAG_CONDA_BASE}/envs/${NEOAG_SNAF_ENV}/bin/python}"
