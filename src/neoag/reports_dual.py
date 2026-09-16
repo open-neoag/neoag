@@ -2471,17 +2471,14 @@ def _patient_track(row: Mapping[str, Any]) -> str:
 def _patient_representatives(rows: list[dict[str, str]], limit: int, track: str | None = None) -> list[dict[str, str]]:
     selected: list[dict[str, str]] = []
     seen_events: set[str] = set()
-    seen_peptide_hla: set[str] = set()
     for row in rows:
         if track and _patient_track(row) != track:
             continue
         event_id = str(row.get("event_id") or row.get("event_name") or row.get("peptide_id") or "")
         event_key = event_id or identity_value(row, "event_identity_id")
-        peptide_hla_key = identity_value(row, "peptide_hla_id")
-        if event_key in seen_events or peptide_hla_key in seen_peptide_hla:
+        if event_key in seen_events:
             continue
         seen_events.add(event_key)
-        seen_peptide_hla.add(peptide_hla_key)
         annotated = dict(row)
         for field, value in candidate_identity(row).items():
             annotated.setdefault(field, value)
@@ -2507,12 +2504,10 @@ def _patient_event_keys(row: Mapping[str, Any]) -> list[str]:
 def _patient_event_neoepitopes(
     row: Mapping[str, Any], peptides: list[dict[str, str]], limit: int = 10,
 ) -> tuple[int, str]:
-    event_keys = set(_patient_event_keys(row))
+    matching_rows = _patient_event_peptide_rows(row, peptides)
     pairs: list[str] = []
     seen: set[tuple[str, str]] = set()
-    for peptide_row in peptides:
-        if event_keys and not event_keys.intersection(_patient_event_keys(peptide_row)):
-            continue
+    for peptide_row in matching_rows:
         peptide = str(peptide_row.get("peptide") or peptide_row.get("mutant_peptide") or "").strip()
         hla = str(peptide_row.get("hla_allele") or peptide_row.get("hla") or "").strip()
         key = (peptide, hla)
@@ -2525,6 +2520,265 @@ def _patient_event_neoepitopes(
     if len(pairs) > limit:
         display += f"；另有{len(pairs) - limit}个组合见明细表"
     return len(pairs), display or "尚未形成可追溯的neoepitope-HLA组合"
+
+
+def _patient_event_peptide_rows(
+    row: Mapping[str, Any], peptides: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Return every peptide-HLA row belonging to one exact biological event."""
+    event_keys = set(_patient_event_keys(row))
+    if not event_keys:
+        return []
+    matching: list[dict[str, str]] = []
+    for peptide_row in peptides:
+        if not event_keys.intersection(_patient_event_keys(peptide_row)):
+            continue
+        matching.append(peptide_row)
+    return matching
+
+
+def _patient_event_evidence_rows(
+    rows: list[dict[str, str]], limit: int = 32,
+) -> list[dict[str, str]]:
+    """Keep distinct peptide-level evidence states for event-level interpretation."""
+    fields = (
+        "hla_allele",
+        "evidence_grade",
+        "hard_failure_codes",
+        "source_chain_hard_failure_codes",
+        "rna_support_state",
+        "presentation_consensus_state",
+        "safety_state",
+        "safety_reason_codes",
+        "fusion_candidate_pool",
+        "splice_candidate_pool",
+        "splice_formal_gate_pass",
+    )
+    selected: list[dict[str, str]] = []
+    seen: set[tuple[str, ...]] = set()
+    for row in rows:
+        signature = tuple(str(row.get(field) or "").strip() for field in fields)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        selected.append(row)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _patient_first_float(row: Mapping[str, Any], *fields: str, default: float) -> float:
+    for field in fields:
+        try:
+            value = str(row.get(field) or "").strip()
+            if value:
+                return float(value)
+        except ValueError:
+            continue
+    return default
+
+
+def _patient_first_observed(row: Mapping[str, Any], *fields: str) -> str | None:
+    for field in fields:
+        value = _patient_observed_value(row, field)
+        if value is not None:
+            return value
+    return None
+
+
+def _patient_epitope_family_key(row: Mapping[str, Any]) -> str:
+    """Build a mutation/junction-centred family key for overlapping peptides."""
+    peptide = re.sub(r"[^A-Z]", "", str(row.get("peptide") or "").upper())
+    protein_change = str(
+        row.get("protein_change_identity_id")
+        or row.get("combined_protein_change")
+        or row.get("alt")
+        or "UNRESOLVED_CHANGE"
+    ).strip()
+    position_text = str(
+        row.get("mutation_position_in_peptide")
+        or row.get("mutation_positions_in_peptide")
+        or row.get("junction_position_in_peptide_1based")
+        or ""
+    )
+    match = re.search(r"\d+", position_text)
+    if peptide and match:
+        position = int(match.group()) - 1
+        if 0 <= position < len(peptide):
+            left = max(0, position - 3)
+            right = min(len(peptide), position + 4)
+            return f"{protein_change}|{peptide[left:right]}"
+    return protein_change
+
+
+def _patient_representative_peptide_sort_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    grade = str(row.get("evidence_grade") or row.get("event_evidence_grade") or "UNASSESSED").strip().upper()
+    grade_order = {
+        "R1": 0,
+        "R2": 1,
+        "R3-READY": 2,
+        "R3-GAP": 3,
+        "R3-REVIEW": 4,
+        "R3": 5,
+        "UNASSESSED": 6,
+        "R4": 9,
+    }
+    hard_failure = any(
+        str(row.get(field) or "").strip().lower() not in {"", "0", "false", "no", "none", "na", "n/a", "unassessed"}
+        for field in ("hard_failure", "hard_failure_codes", "source_chain_hard_failure_codes")
+    )
+    pareto_front = _patient_first_float(row, "pareto_front", default=999.0)
+    net_rank = _patient_first_float(
+        row, "netmhcpan_mt_rank_el", "netmhcpan_el_rank", "el_rank", default=999.0,
+    )
+    mhcflurry = _patient_first_float(
+        row, "mhcflurry_mt_presentation_score", "mhcflurry_presentation_score", default=-1.0,
+    )
+    stability_rank = _patient_first_float(row, "netmhcstabpan_rank", default=999.0)
+    mt_wt = _patient_first_float(
+        row, "mt_wt_el_rank_difference", "mhcflurry_mt_wt_presentation_difference",
+        "bigmhc_mt_wt_score_difference", default=-999.0,
+    )
+    two_core_tools = net_rank < 999.0 and mhcflurry >= 0.0
+    peptide = str(row.get("peptide") or "")
+    return (
+        1 if hard_failure else 0,
+        grade_order.get(grade, 7),
+        pareto_front,
+        0 if two_core_tools else 1,
+        net_rank,
+        -mhcflurry,
+        stability_rank,
+        -mt_wt,
+        abs(len(peptide) - 9),
+        peptide,
+        str(row.get("hla_allele") or ""),
+    )
+
+
+def _patient_representative_peptide_display(row: Mapping[str, Any]) -> str:
+    peptide = str(row.get("peptide") or row.get("mutant_peptide") or "未记录")
+    hla = str(row.get("hla_allele") or row.get("hla") or "未记录")
+    grade = str(row.get("evidence_grade") or row.get("event_evidence_grade") or "UNASSESSED")
+    net_rank = _patient_numeric_display(
+        _patient_first_observed(row, "netmhcpan_mt_rank_el", "netmhcpan_el_rank", "el_rank"), 4,
+    )
+    mhcflurry = _patient_numeric_display(
+        _patient_first_observed(row, "mhcflurry_mt_presentation_score", "mhcflurry_presentation_score"), 4,
+    )
+    stability = _patient_numeric_display(_patient_observed_value(row, "netmhcstabpan_rank"), 4)
+    mt_wt = _patient_numeric_display(
+        _patient_first_observed(
+            row, "mt_wt_el_rank_difference", "mhcflurry_mt_wt_presentation_difference",
+            "bigmhc_mt_wt_score_difference",
+        ),
+        4,
+    )
+    metrics = [
+        f"NetMHCpan EL rank {net_rank}%" if net_rank is not None else "NetMHCpan未评估",
+        f"MHCflurry {mhcflurry}" if mhcflurry is not None else "MHCflurry未评估",
+        f"稳定性rank {stability}%" if stability is not None else "稳定性未评估",
+        f"MT/WT差值 {mt_wt}" if mt_wt is not None else "MT/WT未评估",
+    ]
+    return f"{peptide} / {hla}（证据等级 {grade}，{'，'.join(metrics)}）"
+
+
+def _patient_event_group_cache(
+    events: list[dict[str, str]],
+    peptides: list[dict[str, str]],
+    *,
+    display_limit: int = 3,
+    evidence_limit: int = 32,
+) -> dict[int, dict[str, Any]]:
+    """Summarize selected events in one peptide-table pass.
+
+    The patient report may contain millions of peptide-HLA rows.  Re-scanning
+    that table for every event makes event-grouped reports needlessly costly.
+    """
+    key_to_events: dict[str, set[int]] = {}
+    caches: list[dict[str, Any]] = []
+    for index, event in enumerate(events):
+        caches.append({
+            "pair_seen": set(),
+            "families": {},
+            "evidence_seen": set(),
+            "evidence_rows": [],
+        })
+        for key in _patient_event_keys(event):
+            key_to_events.setdefault(key, set()).add(index)
+
+    evidence_fields = (
+        "hla_allele", "evidence_grade", "hard_failure_codes",
+        "source_chain_hard_failure_codes", "rna_support_state",
+        "presentation_consensus_state", "safety_state", "safety_reason_codes",
+        "fusion_candidate_pool", "splice_candidate_pool", "splice_formal_gate_pass",
+    )
+    for peptide_row in peptides:
+        event_indexes: set[int] = set()
+        for key in _patient_event_keys(peptide_row):
+            event_indexes.update(key_to_events.get(key, ()))
+        if not event_indexes:
+            continue
+        peptide = str(peptide_row.get("peptide") or peptide_row.get("mutant_peptide") or "").strip()
+        hla = str(peptide_row.get("hla_allele") or peptide_row.get("hla") or "").strip()
+        pair = (peptide, hla)
+        signature = tuple(str(peptide_row.get(field) or "").strip() for field in evidence_fields)
+        for index in event_indexes:
+            cache = caches[index]
+            if peptide and pair not in cache["pair_seen"]:
+                cache["pair_seen"].add(pair)
+                family = _patient_epitope_family_key(peptide_row)
+                members = cache["families"].setdefault(family, [])
+                members.append(peptide_row)
+                members.sort(key=_patient_representative_peptide_sort_key)
+                del members[display_limit:]
+            if signature not in cache["evidence_seen"] and len(cache["evidence_rows"]) < evidence_limit:
+                cache["evidence_seen"].add(signature)
+                cache["evidence_rows"].append(peptide_row)
+
+    result: dict[int, dict[str, Any]] = {}
+    for event, cache in zip(events, caches):
+        count = len(cache["pair_seen"])
+        family_representatives = [
+            (family, members[0])
+            for family, members in cache["families"].items()
+            if members
+        ]
+        family_representatives.sort(key=lambda item: _patient_representative_peptide_sort_key(item[1]))
+        representatives = family_representatives[:display_limit]
+        if len(representatives) < display_limit:
+            existing = {
+                (str(row.get("peptide") or ""), str(row.get("hla_allele") or ""))
+                for _, row in representatives
+            }
+            remaining = sorted(
+                (
+                    row
+                    for members in cache["families"].values()
+                    for row in members
+                    if (str(row.get("peptide") or ""), str(row.get("hla_allele") or "")) not in existing
+                ),
+                key=_patient_representative_peptide_sort_key,
+            )
+            for row in remaining:
+                representatives.append((_patient_epitope_family_key(row), row))
+                existing.add((str(row.get("peptide") or ""), str(row.get("hla_allele") or "")))
+                if len(representatives) >= display_limit:
+                    break
+        display = "；".join(
+            f"代表肽{i}：{_patient_representative_peptide_display(row)}"
+            for i, (_, row) in enumerate(representatives, 1)
+        )
+        family_count = len(cache["families"])
+        if count > len(representatives):
+            display += f"；其余{count - len(representatives)}个Peptide-HLA组合见附件"
+        result[id(event)] = {
+            "epitope_count": count,
+            "epitope_family_count": family_count,
+            "epitope_display": display or "尚未形成可追溯的neoepitope-HLA组合",
+            "evidence_rows": cache["evidence_rows"] or [event],
+        }
+    return result
 
 
 def _patient_display_candidate_key(row: Mapping[str, Any], track: str) -> str:
@@ -5712,6 +5966,7 @@ def make_patient_report(
         if patient_top_eligible(row)
     ]
     top = patient_representatives[:candidate_top_n]
+    event_group_cache = _patient_event_group_cache(top, ranked)
     paused_representatives = [row for row in all_representatives if not patient_top_eligible(row)]
     event_grade_counts = _patient_event_grade_counts(bundle.events)
     track_counts: dict[str, int] = {}
@@ -6005,12 +6260,15 @@ def make_patient_report(
     def patient_candidate_rows(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
         result = []
         for rank, row in enumerate(rows, 1):
-            epitope_count, epitope_pairs = _patient_event_neoepitopes(row, ranked)
+            event_group = event_group_cache[id(row)]
+            epitope_count = event_group["epitope_count"]
+            family_count = event_group["epitope_family_count"]
+            epitope_pairs = event_group["epitope_display"]
             result.append({
                 "排名": rank,
                 "突变/事件": row.get("gene", "") or row.get("event_name", "") or row.get("event_id", ""),
                 "类型": _patient_track(row),
-                "候选neoepitope-HLA": f"共{epitope_count}个：{epitope_pairs}",
+                "候选neoepitope-HLA": f"共{family_count}个epitope family、{epitope_count}个组合：{epitope_pairs}",
                 "等级": _patient_event_row_grade(row, event_grade_map),
                 "关键证据与下一步": _patient_event_evidence_and_next_step(row, bundle, val_map),
             })
@@ -6020,6 +6278,7 @@ def make_patient_report(
     out.append(
         f"<h3>当前展示{displayed_candidate_count}个去重候选事件</h3>"
         "<p class='small'>疫苗靶点以突变/融合/剪接等生物学事件为选择单位；同一事件产生的不同肽长、加工位置和HLA组合归在该事件下展示，不重复占据事件排名。"
+        "正文先按突变或连接核心把重叠8–11-mer聚为epitope family，再综合NetMHCpan、MHCflurry、加工/稳定性和MT/WT差异展示最多3个代表肽；其余完整组合保留在附件。"
         "肽段-HLA预测仍作为呈递、MT/WT与安全性证据保留在完整明细表中。本表按事件级证据等级展示候选：R1、R2及R3的三个细分等级"
         "（R3-READY、R3-GAP、R3-REVIEW）。表内不再使用未细分的R3；其中R3-READY表示候选基本合理、"
         "仍需完成指定确认步骤，R3-GAP表示关键资料缺失，R3-REVIEW表示证据冲突或伪影风险需人工复核。"
@@ -6046,21 +6305,53 @@ def make_patient_report(
 
     interpretation_top = top[:20]
     interpretation_count = len(interpretation_top)
-    out.append(f"<div class='section'><h2>6. 人工复核候选事件的综合证据与实验建议（{interpretation_count}个）</h2>")
     out.append(
-        f"<p>本节解读当前进入人工复核的{interpretation_count}个去重候选组合；建议顺序：先确认事件和异常转录本真实性，"
+        "<div class='section'><h2>6. 人工复核候选事件的综合证据与实验建议"
+        f"（按突变/生物学事件去重后{interpretation_count}个）</h2>"
+    )
+    out.append(
+        f"<p>本节解读当前进入人工复核的{interpretation_count}个独立突变/生物学事件。"
+        "同一事件产生的不同肽长、加工位置和HLA组合统一归入该事件，不重复占据审阅位置；"
+        "正文按epitope family仅展示最多3个决策代表肽，完整Peptide-HLA明细继续保留用于呈递和安全性核查。建议顺序：先确认事件和异常转录本真实性，"
         "再补RNA alt/VAF或精确junction证据，完成MT/WT、正常背景和限制性HLA复核，最后开展短肽、长肽、"
         "minigene及T细胞功能实验。</p>"
     )
     interpretation_rows = []
-    for row in interpretation_top:
+    for rank, row in enumerate(interpretation_top, 1):
+        event_group = event_group_cache[id(row)]
+        evidence_rows = event_group["evidence_rows"]
+        epitope_count = event_group["epitope_count"]
+        family_count = event_group["epitope_family_count"]
+        epitope_pairs = event_group["epitope_display"]
+        gap_values = list(dict.fromkeys(
+            gap
+            for candidate in evidence_rows
+            for gap in _patient_key_gaps(candidate, bundle)
+            if gap
+        ))
+        validation_values = list(dict.fromkeys(
+            advice for advice in (_patient_validation(candidate, val_map) for candidate in evidence_rows) if advice
+        ))
+        gap_summary = "；".join(gap_values[:6]) or "未见明确关键缺口；仍需实验确认"
+        if len(gap_values) > 6:
+            gap_summary += f"；另有{len(gap_values) - 6}类肽段级缺口见明细表"
+        validation_summary = "；".join(validation_values[:4]) or "先确认事件真实性，再设计功能实验"
+        if len(validation_values) > 4:
+            validation_summary += f"；另有{len(validation_values) - 4}类肽段级建议见明细表"
         interpretation_rows.append({
-            "候选": f"{row.get('gene', '')} | {row.get('peptide', '')} | {row.get('hla_allele', '')}",
-            "为什么值得关注": _patient_candidate_attention(row, bundle),
-            "当前不确定性": "；".join(_patient_key_gaps(row, bundle)) or "未见明确关键缺口；仍需实验确认",
-            "建议下一步": _patient_validation(row, val_map),
+            "排名": rank,
+            "突变/事件": row.get("gene", "") or row.get("event_name", "") or row.get("event_id", ""),
+            "改变": _patient_event_change(row),
+            "类型": _patient_track(row),
+            "候选neoepitope-HLA": f"共{family_count}个epitope family、{epitope_count}个组合：{epitope_pairs}",
+            "综合证据/为什么值得关注": _patient_candidate_attention(row, bundle),
+            "当前不确定性": gap_summary,
+            "建议下一步": validation_summary,
         })
-    comprehensive_headers = ["候选", "为什么值得关注", "当前不确定性", "建议下一步"]
+    comprehensive_headers = [
+        "排名", "突变/事件", "改变", "类型", "候选neoepitope-HLA",
+        "综合证据/为什么值得关注", "当前不确定性", "建议下一步",
+    ]
     out.append(_table(interpretation_rows, comprehensive_headers))
     out.append("</div>")
 
