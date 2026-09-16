@@ -5,6 +5,7 @@ from pathlib import Path
 
 from neoag.reports_dual import ReportBundle, _apply_patient_gene_expression, _augment_runtime_tool_provenance, _find_bam_input, _patient_analysis_context, _patient_conflict_summary, _patient_disease_background, _patient_dna_evidence, _patient_dna_rna_interpretation, _patient_event_grade_counts, _patient_event_representatives, _patient_evidence_audit_rows, _patient_evidence_summary, _patient_event_change, _patient_expression_tpm_map, _patient_fusion_artifact_review, _patient_fusion_boundary_evidence, _patient_hla_loh_consensus, _patient_key_gaps, _patient_limitation, _patient_manual_review_rows, _patient_metric, _patient_presentation_metric, _patient_presentation_quantitative_row, _patient_rna_measurements, _patient_rna_metric, _patient_safety_dimensions, _patient_safety_gap, _patient_tool_rows, _patient_track, _patient_validation, _replace_gene_ids, load_report_bundle, make_dual_reports, make_patient_report, make_technical_report
 from neoag.reports_dual import _patient_ccf_coverage_rows, _patient_clonality_boundary, _patient_coding_variant_rna_rows, _patient_experiment_entry_gate_rows, _patient_fusion_narrative_rows, _patient_fusion_narrative_tier, _patient_splice_funnel_rows
+from neoag.reports_dual import _patient_event_group_cache
 from neoag.utils import write_tsv
 
 
@@ -287,6 +288,73 @@ def test_patient_validation_translates_safety_recommendation():
     assert "Safety-focused" not in text
 
 
+def test_patient_validation_does_not_apply_stale_weighted_block_to_consensus_r3():
+    row = {
+        "peptide_id": "P_R3",
+        "event_type": "InDel",
+        "evidence_grade": "R3",
+        "rna_support_state": "RNA_UNASSESSED",
+        "rna_depth": "0",
+        "hard_failure_codes": "",
+    }
+    val_map = {
+        "P_R3": {
+            "validation_mode": "do_not_advance",
+            "validation_strategy": "Do not advance",
+            "priority": "D",
+        },
+    }
+    text = _patient_validation(row, val_map)
+    assert "暂缓/不推进" not in text
+    assert "补做RNA位点覆盖与ALT reads/VAF评估" in text
+    assert "新生尾部长肽或minigene" in text
+
+
+def test_patient_validation_keeps_do_not_advance_for_real_hard_failure():
+    row = {
+        "peptide_id": "P_FAIL",
+        "event_type": "InDel",
+        "evidence_grade": "R3",
+        "hard_failure_codes": "HARD_REFERENCE_PROTEOME_MATCH",
+    }
+    val_map = {"P_FAIL": {"validation_strategy": "Do not advance"}}
+    assert "暂缓/不推进" in _patient_validation(row, val_map)
+
+
+def test_patient_validation_uses_event_level_consensus_grade_contract():
+    row = {
+        "peptide_id": "P_EVENT_R3",
+        "event_type": "InDel",
+        "best_evidence_grade": "R3-GAP",
+        "rna_support_state": "RNA_UNASSESSED",
+        "hard_failure_codes": "",
+    }
+    val_map = {"P_EVENT_R3": {"validation_strategy": "Do not advance"}}
+    text = _patient_validation(row, val_map)
+    assert "暂缓/不推进" not in text
+    assert "补做RNA位点覆盖与ALT reads/VAF评估" in text
+
+
+def test_patient_consensus_grade_ignores_nonblocking_legacy_validation_wording():
+    row = {
+        "peptide_id": "P_R3_SAFETY",
+        "event_type": "InDel",
+        "evidence_grade": "R3",
+        "safety_status": "SAFETY_PARTIAL",
+        "rna_support_state": "RNA_CONFIRMED",
+    }
+    val_map = {
+        "P_R3_SAFETY": {
+            "validation_strategy": "Safety-focused validation before efficacy assay",
+            "priority": "C_CAUTION",
+        },
+    }
+    text = _patient_validation(row, val_map)
+    assert "正常组织数据库复核" in text
+    assert "新生尾部长肽或minigene" in text
+    assert "Safety-focused" not in text
+
+
 def test_patient_metric_explains_junction_novel_sequence_instead_of_unassessed():
     fusion = {
         "event_type": "Fusion",
@@ -450,6 +518,24 @@ def test_patient_interpretation_groups_all_neoepitopes_under_one_event(tmp_path)
     assert "同一事件，沿用首行综合证据" in section
     assert "证据等级 R3" in section
     assert "同一事件产生的不同肽长、加工位置和HLA组合统一归入该事件" in text
+
+
+def test_patient_event_representatives_do_not_use_r4_peptides_as_padding():
+    event = {"event_id": "E1", "gene": "GENE1", "event_type": "InDel"}
+    peptides = [
+        {
+            "event_id": "E1", "peptide_id": "P_R3", "peptide": "ABCDEFGHI",
+            "hla_allele": "HLA-A*02:01", "evidence_grade": "R3",
+        },
+        {
+            "event_id": "E1", "peptide_id": "P_R4", "peptide": "BCDEFGHIK",
+            "hla_allele": "HLA-B*07:02", "evidence_grade": "R4",
+        },
+    ]
+    cache = _patient_event_group_cache([event], peptides)
+    representatives = cache[id(event)]["representative_rows"]
+    assert [row["peptide_id"] for row in representatives] == ["P_R3"]
+    assert cache[id(event)]["epitope_count"] == 2
 
 
 def test_patient_event_top_table_uses_event_level_r3_subgrade(tmp_path):

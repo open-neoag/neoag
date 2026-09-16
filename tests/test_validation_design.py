@@ -89,3 +89,36 @@ def test_design_priority_d_do_not_advance():
     row = design_validation_row(_pep(final_priority="D"))
     assert row["validation_mode"] == "do_not_advance"
     assert row["recommended_assay"] == "Do not advance"
+
+
+def test_consensus_r3_without_hard_failure_is_not_blocked_by_weighted_priority_d():
+    row = design_validation_row(_pep(
+        final_priority="D",
+        evidence_grade="R3",
+        event_type="InDel",
+        peptide_consequence="frameshift",
+        rna_support_state="RNA_UNASSESSED",
+        rna_depth="0",
+    ))
+    assert row["validation_mode"] == "frameshift_long"
+    assert row["recommended_assay"] != "Do not advance"
+    assert "RNA locus evidence unassessed" in row["validation_notes"]
+
+
+def test_consensus_r3_hard_failure_remains_blocked():
+    row = design_validation_row(_pep(
+        final_priority="D",
+        evidence_grade="R3",
+        hard_failure_codes="HARD_REFERENCE_PROTEOME_MATCH",
+    ))
+    assert row["validation_mode"] == "do_not_advance"
+
+
+def test_event_level_best_evidence_grade_also_overrides_stale_weighted_d():
+    row = design_validation_row(_pep(
+        final_priority="D",
+        best_evidence_grade="R3-GAP",
+        event_type="InDel",
+        peptide_consequence="frameshift",
+    ))
+    assert row["validation_mode"] == "frameshift_long"

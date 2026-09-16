@@ -2913,6 +2913,19 @@ def _patient_event_group_cache(
         "presentation_consensus_state", "safety_state", "safety_reason_codes",
         "fusion_candidate_pool", "splice_candidate_pool", "splice_formal_gate_pass",
     )
+
+    def reportable_representative(row: Mapping[str, Any]) -> bool:
+        grade = str(row.get("evidence_grade") or row.get("event_evidence_grade") or "").strip().upper()
+        hard_failure = any(
+            str(row.get(field) or "").strip().lower()
+            not in {"", "0", "false", "no", "none", "na", "n/a", "unassessed"}
+            for field in (
+                "hard_failure", "hard_fail", "hard_failure_codes",
+                "source_chain_hard_failure", "source_chain_hard_failure_codes",
+            )
+        )
+        return grade.startswith(("R1", "R2", "R3")) and not hard_failure
+
     for peptide_row in peptides:
         event_indexes: set[int] = set()
         for key in _patient_event_keys(peptide_row):
@@ -2939,11 +2952,11 @@ def _patient_event_group_cache(
     result: dict[int, dict[str, Any]] = {}
     for event, cache in zip(events, caches):
         count = len(cache["pair_seen"])
-        family_representatives = [
-            (family, members[0])
-            for family, members in cache["families"].items()
-            if members
-        ]
+        family_representatives = []
+        for family, members in cache["families"].items():
+            representative = next((row for row in members if reportable_representative(row)), None)
+            if representative is not None:
+                family_representatives.append((family, representative))
         family_representatives.sort(key=lambda item: _patient_representative_peptide_sort_key(item[1]))
         representatives = family_representatives[:display_limit]
         if len(representatives) < display_limit:
@@ -2956,6 +2969,7 @@ def _patient_event_group_cache(
                     row
                     for members in cache["families"].values()
                     for row in members
+                    if reportable_representative(row)
                     if (str(row.get("peptide") or ""), str(row.get("hla_allele") or "")) not in existing
                 ),
                 key=_patient_representative_peptide_sort_key,
@@ -4311,7 +4325,33 @@ def _patient_inferred_tool_rows(rows: list[dict[str, str]], tool_versions: Mappi
 
 def _patient_validation(row: Mapping[str, Any], val_map: Mapping[str, Mapping[str, str]]) -> str:
     val = val_map.get(str(row.get("peptide_id") or ""), {})
-    explicit = str(val.get("validation_strategy") or val.get("recommended_assay") or row.get("recommended_validation") or row.get("recommended_use") or "")
+    grade = str(
+        row.get("evidence_grade")
+        or row.get("event_evidence_grade")
+        or row.get("best_evidence_grade")
+        or ""
+    ).strip().upper()
+    hard_failure = any(
+        str(row.get(field) or "").strip().lower()
+        not in {"", "0", "false", "no", "none", "na", "n/a", "unassessed"}
+        for field in (
+            "hard_failure", "hard_fail", "hard_failure_codes",
+            "source_chain_hard_failure", "source_chain_hard_failure_codes",
+        )
+    ) or str(row.get("safety_status") or "").strip().upper() == "FAIL"
+    if hard_failure or grade == "R4":
+        return "当前暂缓/不推进；先解决最终证据共识记录的阻断项，再决定是否重新评估"
+
+    # Once an R grade exists, the evidence-consensus contract is authoritative.
+    # Legacy weighted validation plans remain technical comparison artifacts and
+    # must not supply priority, gating, or next-step language to the patient report.
+    explicit = "" if grade.startswith(("R1", "R2", "R3")) else str(
+        val.get("validation_strategy")
+        or val.get("recommended_assay")
+        or row.get("recommended_validation")
+        or row.get("recommended_use")
+        or ""
+    )
     if explicit:
         translations = (
             ("do not advance", "当前暂缓/不推进；先解决阻断性证据，再决定是否重新评估"),
@@ -4334,15 +4374,30 @@ def _patient_validation(row: Mapping[str, Any], val_map: Mapping[str, Mapping[st
         # technical outputs and emit a deterministic Chinese recommendation
         # based on the event track here.
     track = _patient_track(row)
+    rna_state = str(row.get("rna_support_state") or row.get("rna_support_status") or "").strip().upper()
+    rna_depth = _float_or_none(_patient_observed_value(row, "rna_depth"))
+    rna_gap = track in {"SNV", "InDel"} and (
+        rna_state in {"RNA_UNASSESSED", "GENE_EXPRESSION_ONLY", "UNASSESSED", "NOT_ASSESSED"}
+        or (rna_state not in {"RNA_CONFIRMED", "RNA_ALT_DETECTED"} and (rna_depth is None or rna_depth <= 0))
+    )
+    steps: list[str] = []
+    if rna_gap:
+        steps.append("补做RNA位点覆盖与ALT reads/VAF评估")
+    if str(row.get("safety_status") or "").strip().upper() in {
+        "CAUTION", "SAFETY_PARTIAL", "PARTIAL", "REVIEW", "UNASSESSED",
+    }:
+        steps.append("完成正常组织数据库复核及实验性脱靶/交叉反应验证")
     if track == "SNV":
-        return "MT/WT成对短肽与ELISpot/多聚体"
-    if track == "InDel":
-        return "新生尾部长肽或minigene"
-    if track == "Fusion":
-        return "RT-PCR/Sanger确认断点，再做融合junction长肽或minigene"
-    if track == "Splice":
-        return "targeted RNA确认junction，再做异常junction长肽或minigene"
-    return "先确认事件真实性，再设计功能实验"
+        steps.append("开展MT/WT成对短肽与ELISpot/多聚体验证")
+    elif track == "InDel":
+        steps.append("开展新生尾部长肽或minigene验证")
+    elif track == "Fusion":
+        steps.append("RT-PCR/Sanger确认断点，再做融合junction长肽或minigene")
+    elif track == "Splice":
+        steps.append("targeted RNA确认junction，再做异常junction长肽或minigene")
+    else:
+        steps.append("先确认事件真实性，再设计功能实验")
+    return "；".join(dict.fromkeys(steps))
 
 
 def _patient_event_grade_map(events: list[dict[str, str]]) -> dict[str, str]:
@@ -6570,7 +6625,8 @@ def make_patient_report(
         "（R3-READY、R3-GAP、R3-REVIEW）。表内不再使用未细分的R3；其中R3-READY表示候选基本合理、"
         "仍需完成指定确认步骤，R3-GAP表示关键资料缺失，R3-REVIEW表示证据冲突或伪影风险需人工复核。"
         "仅纳入身份可追溯的非R4候选；R4、硬失败或明确不推进的候选保留在技术审阅池，不进入本表。"
-        "本表用于研究性候选审阅，不表示已经确认新抗原或可直接进入功能实验。</p>"
+        "本表用于研究性候选审阅，不表示已经确认新抗原或可直接进入功能实验。"
+        "本表的纳入、阻断、等级和下一步仅由当前证据共识合同生成；旧加权优先级仅保留在技术比较附件，不参与患者版决策。</p>"
     )
     out.append(_rowspan_table(
         patient_candidate_rows(top),
