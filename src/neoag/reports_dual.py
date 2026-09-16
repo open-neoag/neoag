@@ -2776,6 +2776,7 @@ def _patient_event_group_cache(
             "epitope_count": count,
             "epitope_family_count": family_count,
             "epitope_display": display or "尚未形成可追溯的neoepitope-HLA组合",
+            "representative_rows": [row for _, row in representatives],
             "evidence_rows": cache["evidence_rows"] or [event],
         }
     return result
@@ -6263,22 +6264,35 @@ def make_patient_report(
             event_group = event_group_cache[id(row)]
             epitope_count = event_group["epitope_count"]
             family_count = event_group["epitope_family_count"]
-            epitope_pairs = event_group["epitope_display"]
-            result.append({
-                "排名": rank,
-                "突变/事件": row.get("gene", "") or row.get("event_name", "") or row.get("event_id", ""),
-                "类型": _patient_track(row),
-                "候选neoepitope-HLA": f"共{family_count}个epitope family、{epitope_count}个组合：{epitope_pairs}",
-                "等级": _patient_event_row_grade(row, event_grade_map),
-                "关键证据与下一步": _patient_event_evidence_and_next_step(row, bundle, val_map),
-            })
+            representatives = event_group["representative_rows"] or [row]
+            event_grade = _patient_event_row_grade(row, event_grade_map)
+            event_name = row.get("gene", "") or row.get("event_name", "") or row.get("event_id", "")
+            for subrank, representative in enumerate(representatives, 1):
+                peptide_grade = str(representative.get("evidence_grade") or "UNASSESSED")
+                result.append({
+                    "排名": f"{rank}.{subrank}",
+                    "突变/事件": event_name,
+                    "类型": _patient_track(row),
+                    "组合概览": (
+                        f"{family_count}个epitope family、{epitope_count}个组合；完整明细见附件"
+                        if subrank == 1 else "同一事件"
+                    ),
+                    "代表肽-HLA": _patient_representative_peptide_display(representative),
+                    "等级": f"事件 {event_grade}；肽 {peptide_grade}",
+                    "关键证据与下一步": (
+                        _patient_event_evidence_and_next_step(row, bundle, val_map)
+                        if subrank == 1 else "同一事件，沿用首行事件级证据与建议"
+                    ),
+                })
         return result
 
-    candidate_headers = ["排名", "突变/事件", "类型", "候选neoepitope-HLA", "等级", "关键证据与下一步"]
+    candidate_headers = [
+        "排名", "突变/事件", "类型", "组合概览", "代表肽-HLA", "等级", "关键证据与下一步",
+    ]
     out.append(
         f"<h3>当前展示{displayed_candidate_count}个去重候选事件</h3>"
         "<p class='small'>疫苗靶点以突变/融合/剪接等生物学事件为选择单位；同一事件产生的不同肽长、加工位置和HLA组合归在该事件下展示，不重复占据事件排名。"
-        "正文先按突变或连接核心把重叠8–11-mer聚为epitope family，再综合NetMHCpan、MHCflurry、加工/稳定性和MT/WT差异展示最多3个代表肽；其余完整组合保留在附件。"
+        "正文先按突变或连接核心把重叠8–11-mer聚为epitope family，再综合证据等级、Pareto层、NetMHCpan、MHCflurry、加工/稳定性和MT/WT差异选择最多3个代表肽；每个代表肽单独占一行，其余完整组合保留在附件。"
         "肽段-HLA预测仍作为呈递、MT/WT与安全性证据保留在完整明细表中。本表按事件级证据等级展示候选：R1、R2及R3的三个细分等级"
         "（R3-READY、R3-GAP、R3-REVIEW）。表内不再使用未细分的R3；其中R3-READY表示候选基本合理、"
         "仍需完成指定确认步骤，R3-GAP表示关键资料缺失，R3-REVIEW表示证据冲突或伪影风险需人工复核。"
@@ -6312,7 +6326,7 @@ def make_patient_report(
     out.append(
         f"<p>本节解读当前进入人工复核的{interpretation_count}个独立突变/生物学事件。"
         "同一事件产生的不同肽长、加工位置和HLA组合统一归入该事件，不重复占据审阅位置；"
-        "正文按epitope family仅展示最多3个决策代表肽，完整Peptide-HLA明细继续保留用于呈递和安全性核查。建议顺序：先确认事件和异常转录本真实性，"
+        "正文按epitope family仅展示最多3个决策代表肽，每个代表肽单独占一行；完整Peptide-HLA明细继续保留用于呈递和安全性核查。建议顺序：先确认事件和异常转录本真实性，"
         "再补RNA alt/VAF或精确junction证据，完成MT/WT、正常背景和限制性HLA复核，最后开展短肽、长肽、"
         "minigene及T细胞功能实验。</p>"
     )
@@ -6322,7 +6336,7 @@ def make_patient_report(
         evidence_rows = event_group["evidence_rows"]
         epitope_count = event_group["epitope_count"]
         family_count = event_group["epitope_family_count"]
-        epitope_pairs = event_group["epitope_display"]
+        representatives = event_group["representative_rows"] or [row]
         gap_values = list(dict.fromkeys(
             gap
             for candidate in evidence_rows
@@ -6338,18 +6352,27 @@ def make_patient_report(
         validation_summary = "；".join(validation_values[:4]) or "先确认事件真实性，再设计功能实验"
         if len(validation_values) > 4:
             validation_summary += f"；另有{len(validation_values) - 4}类肽段级建议见明细表"
-        interpretation_rows.append({
-            "排名": rank,
-            "突变/事件": row.get("gene", "") or row.get("event_name", "") or row.get("event_id", ""),
-            "改变": _patient_event_change(row),
-            "类型": _patient_track(row),
-            "候选neoepitope-HLA": f"共{family_count}个epitope family、{epitope_count}个组合：{epitope_pairs}",
-            "综合证据/为什么值得关注": _patient_candidate_attention(row, bundle),
-            "当前不确定性": gap_summary,
-            "建议下一步": validation_summary,
-        })
+        event_name = row.get("gene", "") or row.get("event_name", "") or row.get("event_id", "")
+        for subrank, representative in enumerate(representatives, 1):
+            interpretation_rows.append({
+                "排名": f"{rank}.{subrank}",
+                "突变/事件": event_name,
+                "改变": _patient_event_change(row),
+                "类型": _patient_track(row),
+                "组合概览": (
+                    f"{family_count}个epitope family、{epitope_count}个组合；完整明细见附件"
+                    if subrank == 1 else "同一事件"
+                ),
+                "代表肽-HLA": _patient_representative_peptide_display(representative),
+                "综合证据/为什么值得关注": (
+                    _patient_candidate_attention(row, bundle)
+                    if subrank == 1 else "同一事件，沿用首行综合证据"
+                ),
+                "当前不确定性": gap_summary if subrank == 1 else "同一事件，沿用首行不确定性",
+                "建议下一步": validation_summary if subrank == 1 else "同一事件，沿用首行实验建议",
+            })
     comprehensive_headers = [
-        "排名", "突变/事件", "改变", "类型", "候选neoepitope-HLA",
+        "排名", "突变/事件", "改变", "类型", "组合概览", "代表肽-HLA",
         "综合证据/为什么值得关注", "当前不确定性", "建议下一步",
     ]
     out.append(_table(interpretation_rows, comprehensive_headers))

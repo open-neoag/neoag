@@ -56,7 +56,8 @@ def test_patient_report_is_plain_language(tmp_path):
     assert "关键证据与下一步" in text
     section6 = text.split("6. 人工复核候选事件的综合证据与实验建议（按突变/生物学事件去重后1个）", 1)[1].split("7. 分析方法与工具状态", 1)[0]
     assert "<th>突变/事件</th>" in section6
-    assert "<th>候选neoepitope-HLA</th>" in section6
+    assert "<th>组合概览</th>" in section6
+    assert "<th>代表肽-HLA</th>" in section6
     assert "<th>综合证据/为什么值得关注</th>" in section6
     assert "<th>当前不确定性</th>" in section6
     assert "<th>建议下一步</th>" in section6
@@ -184,7 +185,7 @@ def test_patient_top_candidates_include_non_r4_technical_review_rows(tmp_path):
     text = out.read_text(encoding="utf-8")
     section = text.split("<h3>当前展示100个去重候选事件</h3>", 1)[1].split("</table>", 1)[0]
     assert section.count("<tr>") - 1 == 100
-    assert section.count("<td>R3-REVIEW</td>") == 100
+    assert section.count("事件 R3-REVIEW；肽") == 100
     assert "G99" in section
     assert "G100" not in section
 
@@ -436,10 +437,11 @@ def test_patient_interpretation_groups_all_neoepitopes_under_one_event(tmp_path)
     section = text.split(
         "6. 人工复核候选事件的综合证据与实验建议（按突变/生物学事件去重后1个）", 1
     )[1].split("7. 分析方法与工具状态", 1)[0]
-    assert section.count("<tr>") - 1 == 1
-    assert "共1个epitope family、2个组合" in section
-    assert "代表肽1：ABCDEFGHI / HLA-A*02:01" in section
-    assert "代表肽2：BCDEFGHIJ / HLA-B*07:02" in section
+    assert section.count("<tr>") - 1 == 2
+    assert "1个epitope family、2个组合" in section
+    assert "1.1" in section and "ABCDEFGHI / HLA-A*02:01" in section
+    assert "1.2" in section and "BCDEFGHIJ / HLA-B*07:02" in section
+    assert "同一事件，沿用首行综合证据" in section
     assert "证据等级 R3" in section
     assert "同一事件产生的不同肽长、加工位置和HLA组合统一归入该事件" in text
 
@@ -2258,7 +2260,7 @@ def test_disease_knowledge_prioritizes_display_without_changing_r_grade(tmp_path
     assert "本报告本身不替代病理诊断" in text
     assert "结构化临床诊断" in text
     assert "分子知识库锚定" in text
-    assert "<td>R3-" in section
+    assert "事件 R3-" in section
     assert "<td>R1</td>" not in section
     assert "<td>R2</td>" not in section
 
