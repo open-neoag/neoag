@@ -191,7 +191,7 @@ def test_patient_top_candidates_include_non_r4_technical_review_rows(tmp_path):
 
     interpretation = text.split("6. 人工复核候选事件的综合证据与实验建议（按突变/生物学事件去重后20个）", 1)[1].split("7. 分析方法与工具状态", 1)[0]
     assert interpretation.count("<tr>") - 1 == 20
-    assert "<td>G19</td>" in interpretation
+    assert ">G19</td>" in interpretation
     assert "<td>G20</td>" not in interpretation
 
 
@@ -439,8 +439,11 @@ def test_patient_interpretation_groups_all_neoepitopes_under_one_event(tmp_path)
     )[1].split("7. 分析方法与工具状态", 1)[0]
     assert section.count("<tr>") - 1 == 2
     assert "1个epitope family、2个组合" in section
-    assert "1.1" in section and "ABCDEFGHI / HLA-A*02:01" in section
-    assert "1.2" in section and "BCDEFGHIJ / HLA-B*07:02" in section
+    assert "rowspan=&#x27;2&#x27;" not in section
+    assert "rowspan='2'" in section
+    assert "1.1" not in section and "1.2" not in section
+    assert "ABCDEFGHI / HLA-A*02:01" in section
+    assert "BCDEFGHIJ / HLA-B*07:02" in section
     assert "同一事件，沿用首行综合证据" in section
     assert "证据等级 R3" in section
     assert "同一事件产生的不同肽长、加工位置和HLA组合统一归入该事件" in text
@@ -2276,3 +2279,60 @@ def test_disease_knowledge_is_auto_discovered_from_structured_disease():
     assert bundle.disease_knowledge["status"] == "LOADED"
     assert bundle.disease_knowledge["disease_id"] == "DSRCT"
     assert bundle.disease_knowledge["anchors"][0]["event"] == "EWSR1::WT1"
+
+
+def test_resumed_result_recovers_case_metadata_purity_and_hla_loh(tmp_path):
+    case_root = tmp_path / "CASE01"
+    result_root = case_root / "scoring" / "rerank"
+    result_root.mkdir(parents=True)
+    purity_root = case_root / "purity_cnv"
+    purity_root.mkdir()
+    (purity_root / "facets_purity.tsv").write_text(
+        "sample_id\tpurity\tevidence_status\nCASE01\t0.28\treal\n", encoding="utf-8",
+    )
+    (purity_root / "purple_purity.tsv").write_text(
+        "purity\tploidy\tstatus\n0.13\t2.12\tNORMAL\n", encoding="utf-8",
+    )
+    (purity_root / "sequenza_purity.tsv").write_text(
+        "sample_id\tpurity\tploidy\tconfidence\nCASE01\t0.12\t2.2\tlow\n", encoding="utf-8",
+    )
+    hla_root = case_root / "hla_loh_consensus"
+    hla_root.mkdir()
+    (hla_root / "spechla_hla_loh.tsv").write_text(
+        "hla_allele\tloh_status\tevidence_tool\nHLA-A*02:01\tno\tspechla\n", encoding="utf-8",
+    )
+    evidence = result_root / "all_tool_results.tsv"
+    evidence.write_text(
+        "peptide_id\tevent_id\tpeptide\thla_allele\tevidence_grade\nP1\tE1\tAAAAAAAAA\tHLA-A*02:01\tR3\n",
+        encoding="utf-8",
+    )
+    evidence_sha = hashlib.sha256(evidence.read_bytes()).hexdigest()
+    (result_root / "all_tool_results.manifest.json").write_text(json.dumps({
+        "output": {"path": str(evidence), "sha256": evidence_sha},
+    }), encoding="utf-8")
+    (result_root / "run_manifest.json").write_text(json.dumps({
+        "run_id": "run-CASE01", "sample_id": "CASE01", "mode": "ranking-only",
+        "genome_build": "GRCh38",
+    }), encoding="utf-8")
+    (result_root / "evidence_consensus_run.json").write_text(json.dumps({
+        "rules_name": "sarcoma_evidence_consensus_v3_source_chain",
+        "rules_version": "3.0-alpha1", "input": {"sha256": evidence_sha},
+    }), encoding="utf-8")
+
+    base = _bundle()
+    bundle = load_report_bundle(
+        profile={"_profile_name": "default"},
+        events=base.events,
+        peptides=base.peptides,
+        outdir=result_root,
+    )
+    assert {row["tool"] for row in bundle.purity_tools} == {"FACETS", "PURPLE", "Sequenza"}
+    assert bundle.purity_consensus["status"] == "MULTI_TOOL_DISCORDANT_REVIEW"
+    assert any(row.get("_report_tool") == "SpecHLA" for row in bundle.hla_loh_tool_results)
+    out = tmp_path / "recovered_patient.html"
+    make_patient_report(out, bundle)
+    text = out.read_text(encoding="utf-8")
+    assert "sarcoma_evidence_consensus_v3_source_chain" in text
+    assert "3.0-alpha1" in text
+    assert evidence_sha in text
+    assert "仅SpecHLA报告未提示LOH，证据有限" in text

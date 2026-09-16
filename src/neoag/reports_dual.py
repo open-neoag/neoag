@@ -111,10 +111,24 @@ def _first_existing(paths: list[Path | None]) -> Path | None:
     return None
 
 
+def _report_case_roots(root: Path | None) -> list[Path]:
+    """Return bounded case-local roots for resumed/ranking-only report recovery."""
+    if root is None:
+        return []
+    roots: list[Path] = []
+    current = root
+    for _ in range(3):
+        if current not in roots:
+            roots.append(current)
+        current = current.parent
+    return roots
+
+
 def _hla_loh_search_roots(root: Path | None, provenance: Mapping[str, Any] | None = None) -> list[Path]:
     roots: list[Path] = []
     if root:
-        roots.extend([root, root.parent, root.parent / "evidence", root.parent / "evidence" / "hla_loh"])
+        for case_root in _report_case_roots(root):
+            roots.extend([case_root, case_root / "evidence", case_root / "evidence" / "hla_loh"])
     for value in (
         (provenance or {}).get("hla_loh"),
         ((provenance or {}).get("tools") or {}).get("hla_loh", {}).get("file") if isinstance((provenance or {}).get("tools"), Mapping) else None,
@@ -684,6 +698,33 @@ def _table(rows: list[Mapping[str, Any]], headers: list[str], *, max_rows: int |
     out = ["<table><tr>" + "".join(f"<th>{esc(h)}</th>" for h in headers) + "</tr>"]
     for row in view:
         out.append("<tr>" + "".join(f"<td>{esc(row.get(h, ''))}</td>" for h in headers) + "</tr>")
+    out.append("</table>")
+    return "\n".join(out)
+
+
+def _rowspan_table(
+    groups: list[list[Mapping[str, Any]]],
+    headers: list[str],
+    rowspan_headers: tuple[str, ...],
+) -> str:
+    """Render event metadata once while keeping peptide evidence on subrows."""
+    out = ["<table><tr>" + "".join(f"<th>{esc(h)}</th>" for h in headers) + "</tr>"]
+    rowspan_set = set(rowspan_headers)
+    for group in groups:
+        if not group:
+            continue
+        span = len(group)
+        for index, row in enumerate(group):
+            cells: list[str] = []
+            for header in headers:
+                if header in rowspan_set:
+                    if index == 0:
+                        cells.append(
+                            f"<td rowspan='{span}' style='vertical-align:top'>{esc(row.get(header, ''))}</td>"
+                        )
+                    continue
+                cells.append(f"<td>{esc(row.get(header, ''))}</td>")
+            out.append("<tr>" + "".join(cells) + "</tr>")
     out.append("</table>")
     return "\n".join(out)
 
@@ -1522,7 +1563,75 @@ def _augment_runtime_tool_provenance(root: Path, provenance: dict[str, Any]) -> 
 
 
 
+def _recover_case_purity_results(root: Path) -> tuple[list[dict[str, str]], dict[str, str]]:
+    layouts = {
+        "FACETS": ("purity_cnv/facets_purity.tsv", "facets/purity.tsv"),
+        "PURPLE": ("purity_cnv/purple_purity.tsv", "purple/purity.tsv"),
+        "Sequenza": ("purity_cnv/sequenza_purity.tsv", "sequenza/purity.tsv"),
+    }
+    tools: list[dict[str, str]] = []
+    for tool, relative_paths in layouts.items():
+        path = _first_existing([
+            case_root / relative
+            for case_root in _report_case_roots(root)
+            for relative in relative_paths
+        ])
+        if not path:
+            continue
+        rows = _read_optional(path)
+        row = rows[0] if rows else {}
+        purity = str(row.get("purity") or row.get("cellularity") or "").strip()
+        ploidy = str(row.get("ploidy") or "").strip()
+        if purity.upper() in {"", "NA", "N/A", "NONE", "."} and ploidy.upper() in {"", "NA", "N/A", "NONE", "."}:
+            continue
+        raw_status = str(row.get("evidence_status") or row.get("confidence") or row.get("status") or "ASSESSED")
+        status = "LOW_CONFIDENCE" if "low" in raw_status.lower() else "ASSESSED"
+        tools.append({
+            "tool": tool,
+            "purity": purity,
+            "ploidy": ploidy,
+            "status": status,
+            "note": f"从病例结果目录回链 {path.name}；原始状态={raw_status}",
+            "source_file": str(path),
+        })
+    purities: list[float] = []
+    ploidies: list[float] = []
+    for row in tools:
+        try:
+            purities.append(float(row["purity"]))
+        except (TypeError, ValueError):
+            pass
+        try:
+            ploidies.append(float(row["ploidy"]))
+        except (TypeError, ValueError):
+            pass
+    if not purities:
+        return tools, {}
+    purities.sort()
+    ploidies.sort()
+    median_purity = purities[len(purities) // 2]
+    median_ploidy = ploidies[len(ploidies) // 2] if ploidies else None
+    purity_range = max(purities) - min(purities)
+    discordant = len(purities) > 1 and purity_range > 0.10
+    consensus = {
+        "recommended_purity": f"{median_purity:.6g}",
+        "recommended_ploidy": f"{median_ploidy:.6g}" if median_ploidy is not None else "",
+        "selected_tool": "多工具中位数（报告恢复）" if len(purities) > 1 else tools[0]["tool"],
+        "status": "MULTI_TOOL_DISCORDANT_REVIEW" if discordant else ("MULTI_TOOL_CONCORDANT" if len(purities) > 1 else "SINGLE_TOOL_NO_CROSSCHECK"),
+        "basis": (
+            f"从病例目录恢复{len(tools)}个工具结果；纯度范围{min(purities):.4f}–{max(purities):.4f}。"
+            + ("工具差异明显，中位数仅作审阅参考，不替代人工裁定。" if discordant else "工具结果可相互核对。")
+        ),
+    }
+    return tools, consensus
+
+
 def _augment_purity_cnv_provenance(root: Path, prov: dict[str, Any]) -> None:
+    recovered_tools, recovered_consensus = _recover_case_purity_results(root)
+    if recovered_tools:
+        prov["purity_cnv_tools"] = recovered_tools
+        prov["purity_cnv_consensus"] = recovered_consensus
+        return
     production = root.parent
     summary_path = production / "evidence" / "purity_cnv" / "purity_cnv_tool_summary.tsv"
     if not summary_path.is_file() or summary_path.stat().st_size == 0:
@@ -1651,6 +1760,27 @@ def _augment_purity_from_ranked_rows(prov: dict[str, Any], rows: list[dict[str, 
         ),
     }
 
+
+def _augment_release_provenance(root: Path, prov: dict[str, Any]) -> None:
+    """Recover release metadata from standard manifests in resumed outputs."""
+    run_manifest = _read_json_optional(root / "run_manifest.json")
+    for key in ("run_id", "sample_id", "case_id", "mode", "profile", "genome_build", "schema_version"):
+        if run_manifest.get(key) and not prov.get(key):
+            prov[key] = run_manifest[key]
+    if run_manifest:
+        prov.setdefault("open_neo_run_manifest", run_manifest)
+
+    consensus_manifest = _read_json_optional(root / "evidence_consensus_run.json")
+    if consensus_manifest:
+        prov.setdefault("evidence_consensus", consensus_manifest)
+        for key in ("rules_name", "rules_version", "rules_sha256", "algorithm"):
+            if consensus_manifest.get(key) and not prov.get(key):
+                prov[key] = consensus_manifest[key]
+
+    evidence_manifest = _read_json_optional(root / "all_tool_results.manifest.json")
+    if evidence_manifest:
+        prov.setdefault("all_tool_results_manifest", evidence_manifest)
+
 def load_report_bundle(
     *,
     profile: Mapping[str, Any],
@@ -1669,6 +1799,7 @@ def load_report_bundle(
     if root and not prov:
         prov = _read_json_optional(root / "provenance.json")
     if root:
+        _augment_release_provenance(root, prov)
         _augment_runtime_tool_provenance(root, prov)
         _augment_purity_cnv_provenance(root, prov)
         funnel_path = root / "parsed" / "splice_prefilter_funnel.tsv"
@@ -1693,9 +1824,13 @@ def load_report_bundle(
             if candidate.is_file():
                 source_events = _read_optional(candidate)
                 break
+    direct_evidence_path = p("all_tool_results.tsv") if root else None
+    pipeline_evidence_path = p("pipeline", "all_tool_results.tsv") if root else None
     nested_evidence_path = p("scoring", "evidence_consensus", "all_tool_results.tsv") if root else None
     scoring_evidence_path = p("scoring", "all_tool_results.tsv") if root else None
-    canonical_evidence_path = _first_existing([nested_evidence_path, scoring_evidence_path])
+    canonical_evidence_path = _first_existing([
+        direct_evidence_path, pipeline_evidence_path, nested_evidence_path, scoring_evidence_path,
+    ])
     if canonical_evidence_path:
         evidence_source_label = _report_relpath(canonical_evidence_path, root)
         evidence_source_status = "CANONICAL_ALL_TOOL_RESULTS"
@@ -1739,6 +1874,12 @@ def load_report_bundle(
             or _vcf_depth_summary_from_provenance(prov, root, source_events + events + peptides, "normal")
             or _bam_depth_summary_from_provenance(prov, root, "normal")
         )
+    if not prov.get("pairing_status"):
+        normal_depth = str(prov.get("normal_dna_depth") or "").strip()
+        if normal_depth:
+            prov["pairing_status"] = "配对正常DNA证据已接入；样本身份一致性未由BAM Matcher单独确认"
+        else:
+            prov["pairing_status"] = "本次最终证据表未保留可判定的配对正常DNA位点证据；需回链配对VCF/BAM"
     if not prov.get("genome_build"):
         for row in events + peptides:
             build = str(row.get("genome_build") or "").strip()
@@ -1810,6 +1951,7 @@ def load_report_bundle(
         }
     evidence_manifest = _read_json_optional(_first_existing([
         canonical_evidence_path.with_name("all_tool_results.manifest.json") if canonical_evidence_path else None,
+        p("all_tool_results.manifest.json") if root else None,
         p("scoring", "evidence_consensus", "all_tool_results.manifest.json") if root else None,
         p("scoring", "all_tool_results.manifest.json") if root else None,
     ]))
@@ -5575,13 +5717,13 @@ def _patient_qc_rows(bundle: ReportBundle) -> list[dict[str, str]]:
         {"项目": "结构化临床诊断", "结果": diagnosis_result, "解释": diagnosis_basis},
         {"项目": "分析配置", "结果": analysis_result, "解释": analysis_basis},
         {"项目": "分子知识库锚定", "结果": anchor_result, "解释": anchor_basis},
-        {"项目": "肿瘤/正常配对", "结果": str(provenance.get("pairing_status") or "未评估"), "解释": "区分已使用配对输入与已完成指纹确认"},
+        {"项目": "肿瘤/正常配对", "结果": str(provenance.get("pairing_status") or "最终清单未确认配对状态"), "解释": "区分已使用配对输入与已完成指纹确认"},
         {"项目": "肿瘤纯度/倍性", "结果": purity_result, "解释": "用于CNV和LOH解释；工具冲突必须保留"},
         {"项目": "肿瘤DNA深度", "结果": str(provenance.get("tumor_dna_depth") or "未评估"), "解释": "默认汇总去重事件位点有效深度；低深度会降低检出能力"},
-        {"项目": "正常DNA深度", "结果": str(provenance.get("normal_dna_depth") or "未评估"), "解释": "优先汇总候选位点normal_depth；缺失时从配对VCF正常样本DP/AD回填，再回退到normal DNA BAM覆盖估算"},
+        {"项目": "正常DNA深度", "结果": str(provenance.get("normal_dna_depth") or "最终证据表未保留可判定的正常位点深度"), "解释": "优先汇总候选位点normal_depth；缺失时从配对VCF正常样本DP/AD回填，再回退到normal DNA BAM覆盖估算"},
         {"项目": "RNA质量/覆盖", "结果": str(provenance.get("rna_qc_status") or "未评估"), "解释": "区分RNA支持、充分覆盖下未检出和表达层证据"},
-        {"项目": "参考版本", "结果": str(provenance.get("genome_build") or "未记录"), "解释": "FASTA、GTF、VEP和坐标必须一致"},
-        {"项目": "QC证据来源", "结果": "all_tool_results.tsv" if bundle.evidence_source_status == "CANONICAL_ALL_TOOL_RESULTS" else "未完整归一化", "解释": "样本QC汇总与候选排序的数据职责分离"},
+        {"项目": "参考版本", "结果": str(provenance.get("genome_build") or "最终清单未声明参考版本"), "解释": "FASTA、GTF、VEP和坐标必须一致"},
+        {"项目": "QC证据来源", "结果": "all_tool_results.tsv（规范化证据表）" if bundle.evidence_source_status == "CANONICAL_ALL_TOOL_RESULTS" else "仅排序输入；未发现规范化all_tool_results.tsv", "解释": "样本QC汇总与候选排序的数据职责分离"},
         {"项目": "纯度/倍性多工具综合建议", "结果": purity_result, "解释": purity_basis},
     ]
     return rows
@@ -5628,7 +5770,11 @@ def _patient_hla_loh_consensus(bundle: ReportBundle) -> tuple[list[dict[str, str
             continue
         by_tool[tool].setdefault(allele, set()).add(_patient_hla_loh_status(record.get("loh_status") or record.get("status")))
         prefix = "lohhla_" if tool == "LOHHLA" else "spechla_"
-        has_evidence = any(str(value or "").strip() for key, value in record.items() if key.startswith(prefix))
+        has_evidence = any(
+            str(value or "").strip()
+            for key, value in record.items()
+            if isinstance(key, str) and key.startswith(prefix)
+        )
         tool_evidence[tool][allele] = tool_evidence[tool].get(allele, False) or has_evidence or bool(record.get("_report_source"))
 
     restricting = sorted({
@@ -5807,12 +5953,22 @@ def _patient_tool_rows(bundle: ReportBundle) -> list[dict[str, str]]:
 
 
 def _patient_release_metadata(bundle: ReportBundle) -> dict[str, str]:
-    input_hash = str(bundle.evidence_integrity.get("actual_sha256") or bundle.evidence_integrity.get("expected_sha256") or "")
+    evidence_consensus = bundle.provenance.get("evidence_consensus") or {}
+    manifest_output = (bundle.evidence_manifest.get("output") or {}) if isinstance(bundle.evidence_manifest, Mapping) else {}
+    manifest_input = (bundle.evidence_manifest.get("input") or {}) if isinstance(bundle.evidence_manifest, Mapping) else {}
+    input_hash = str(
+        bundle.evidence_integrity.get("actual_sha256")
+        or bundle.evidence_integrity.get("expected_sha256")
+        or manifest_output.get("sha256")
+        or manifest_input.get("sha256")
+        or evidence_consensus.get("input", {}).get("sha256")
+        or ""
+    )
     rules_version = str(
         bundle.profile.get("rules_version")
         or bundle.profile.get("version")
         or bundle.profile.get("_profile_version")
-        or (bundle.provenance.get("evidence_consensus") or {}).get("rules_version")
+        or evidence_consensus.get("rules_version")
         or (bundle.provenance.get("parallel_rankings") or {}).get("rules_version")
         or "未记录"
     )
@@ -5820,15 +5976,50 @@ def _patient_release_metadata(bundle: ReportBundle) -> dict[str, str]:
     if not run_id and input_hash:
         run_id = f"{bundle.sample_id or 'sample'}-{input_hash[:12]}"
     contract = bundle.provenance.get("cohort_rule_contract") or {}
+    rules_name = str(
+        contract.get("id")
+        or bundle.provenance.get("rules_name")
+        or evidence_consensus.get("rules_name")
+        or bundle.profile.get("_profile_name")
+        or "open-neo-evidence-consensus"
+    )
+    derived_contract = not bool(contract)
     return {
         "run_id": run_id or "未记录",
         "rules_version": rules_version,
         "input_sha256": input_hash or "未记录",
-        "cohort_rule_set": str(contract.get("id") or "未记录"),
-        "cohort_rule_version": str(contract.get("version") or "未记录"),
-        "report_contract_version": str(contract.get("report_contract_version") or "未记录"),
-        "cohort_comparability": str(contract.get("comparability_status") or "未评估"),
+        "cohort_rule_set": rules_name,
+        "cohort_rule_version": str(contract.get("version") or rules_version),
+        "report_contract_version": str(contract.get("report_contract_version") or "open-neo-patient-report-v3"),
+        "cohort_comparability": str(
+            contract.get("comparability_status")
+            or ("RULESET_IDENTIFIED_NOT_LOCKED" if derived_contract else "UNASSESSED_CONTRACT")
+        ),
     }
+
+
+def _patient_entry_mode(bundle: ReportBundle) -> str:
+    if str(bundle.entry_mode or "").strip():
+        return str(bundle.entry_mode)
+    mode = str(bundle.provenance.get("mode") or "").strip()
+    tracks = sorted({_patient_track(row) for row in (bundle.events or bundle.peptides) if _patient_track(row) != "Other"})
+    track_text = " + ".join(tracks) if tracks else "候选事件"
+    if mode == "ranking-only":
+        return f"既有结果复用：{track_text} 联合共识排序"
+    if mode:
+        return f"{mode}：{track_text}"
+    return f"{track_text} 联合分析"
+
+
+def _patient_profile_name(bundle: ReportBundle) -> str:
+    consensus = bundle.provenance.get("evidence_consensus") or {}
+    return str(
+        bundle.provenance.get("rules_name")
+        or consensus.get("rules_name")
+        or bundle.profile.get("_profile_name")
+        or bundle.provenance.get("profile")
+        or "open-neo-evidence-consensus"
+    )
 
 
 def _patient_release_audit(
@@ -6010,8 +6201,8 @@ def make_patient_report(
     out.append("<div class='section'><h2>1. 报告摘要</h2>")
     summary = [
         {"项目": "样本编号", "结果": bundle.sample_id or "未注明", "说明": "以运行清单为准"},
-        {"项目": "分析入口", "结果": bundle.entry_mode or "未注明", "说明": "可能为VCF、融合、剪接或联合入口"},
-        {"项目": "评分配置", "结果": str(bundle.profile.get("_profile_name") or "未记录"), "说明": "研究性规则版本"},
+        {"项目": "分析入口", "结果": _patient_entry_mode(bundle), "说明": "由运行模式与实际事件赛道生成"},
+        {"项目": "评分配置", "结果": _patient_profile_name(bundle), "说明": "实际证据共识规则集；具体版本见下方"},
     ]
     release_metadata = _patient_release_metadata(bundle)
     summary.extend([
@@ -6258,8 +6449,8 @@ def make_patient_report(
         f"（按突变/生物学事件去重后{displayed_candidate_count}个）</h2>"
     )
 
-    def patient_candidate_rows(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
-        result = []
+    def patient_candidate_rows(rows: list[dict[str, str]]) -> list[list[dict[str, Any]]]:
+        result: list[list[dict[str, Any]]] = []
         for rank, row in enumerate(rows, 1):
             event_group = event_group_cache[id(row)]
             epitope_count = event_group["epitope_count"]
@@ -6267,10 +6458,11 @@ def make_patient_report(
             representatives = event_group["representative_rows"] or [row]
             event_grade = _patient_event_row_grade(row, event_grade_map)
             event_name = row.get("gene", "") or row.get("event_name", "") or row.get("event_id", "")
+            event_rows: list[dict[str, Any]] = []
             for subrank, representative in enumerate(representatives, 1):
                 peptide_grade = str(representative.get("evidence_grade") or "UNASSESSED")
-                result.append({
-                    "排名": f"{rank}.{subrank}",
+                event_rows.append({
+                    "排名": rank,
                     "突变/事件": event_name,
                     "类型": _patient_track(row),
                     "组合概览": (
@@ -6284,6 +6476,7 @@ def make_patient_report(
                         if subrank == 1 else "同一事件，沿用首行事件级证据与建议"
                     ),
                 })
+            result.append(event_rows)
         return result
 
     candidate_headers = [
@@ -6299,7 +6492,11 @@ def make_patient_report(
         "仅纳入身份可追溯的非R4候选；R4、硬失败或明确不推进的候选保留在技术审阅池，不进入本表。"
         "本表用于研究性候选审阅，不表示已经确认新抗原或可直接进入功能实验。</p>"
     )
-    out.append(_table(patient_candidate_rows(top), candidate_headers))
+    out.append(_rowspan_table(
+        patient_candidate_rows(top),
+        candidate_headers,
+        ("排名", "突变/事件", "类型", "组合概览"),
+    ))
     quantitative_rows = [
         _patient_presentation_quantitative_row(row, index)
         for index, row in enumerate(top, start=1)
@@ -6330,7 +6527,7 @@ def make_patient_report(
         "再补RNA alt/VAF或精确junction证据，完成MT/WT、正常背景和限制性HLA复核，最后开展短肽、长肽、"
         "minigene及T细胞功能实验。</p>"
     )
-    interpretation_rows = []
+    interpretation_rows: list[list[dict[str, Any]]] = []
     for rank, row in enumerate(interpretation_top, 1):
         event_group = event_group_cache[id(row)]
         evidence_rows = event_group["evidence_rows"]
@@ -6353,9 +6550,10 @@ def make_patient_report(
         if len(validation_values) > 4:
             validation_summary += f"；另有{len(validation_values) - 4}类肽段级建议见明细表"
         event_name = row.get("gene", "") or row.get("event_name", "") or row.get("event_id", "")
+        event_rows: list[dict[str, Any]] = []
         for subrank, representative in enumerate(representatives, 1):
-            interpretation_rows.append({
-                "排名": f"{rank}.{subrank}",
+            event_rows.append({
+                "排名": rank,
                 "突变/事件": event_name,
                 "改变": _patient_event_change(row),
                 "类型": _patient_track(row),
@@ -6371,11 +6569,16 @@ def make_patient_report(
                 "当前不确定性": gap_summary if subrank == 1 else "同一事件，沿用首行不确定性",
                 "建议下一步": validation_summary if subrank == 1 else "同一事件，沿用首行实验建议",
             })
+        interpretation_rows.append(event_rows)
     comprehensive_headers = [
         "排名", "突变/事件", "改变", "类型", "组合概览", "代表肽-HLA",
         "综合证据/为什么值得关注", "当前不确定性", "建议下一步",
     ]
-    out.append(_table(interpretation_rows, comprehensive_headers))
+    out.append(_rowspan_table(
+        interpretation_rows,
+        comprehensive_headers,
+        ("排名", "突变/事件", "改变", "类型"),
+    ))
     out.append("</div>")
 
     out.append("<div class='section'><h2>7. 分析方法与工具状态</h2>")
