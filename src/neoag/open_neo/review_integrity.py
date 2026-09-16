@@ -67,8 +67,13 @@ def _manifest_hash_records(value: Any) -> list[tuple[str, str]]:
     if isinstance(value, dict):
         path = value.get("path")
         digest = value.get("sha256")
-        if isinstance(path, str) and isinstance(digest, str) and digest not in {"", "-", "NA", "not_computed_large_file"}:
-            records.append((path, digest))
+        normalized_digest = digest.strip().lower() if isinstance(digest, str) else ""
+        if (
+            isinstance(path, str)
+            and len(normalized_digest) == 64
+            and all(character in "0123456789abcdef" for character in normalized_digest)
+        ):
+            records.append((path, normalized_digest))
         for nested in value.values():
             records.extend(_manifest_hash_records(nested))
     elif isinstance(value, list):
@@ -365,7 +370,8 @@ def audit_review_inputs(artifacts: dict[str, str], outdir: str | Path) -> dict[s
     for row in peptides:
         rna_state = str(row.get("rna_support_state") or "").upper()
         rna_status = str(row.get("rna_support_status") or "").upper()
-        if "UNASSESSED" in rna_state and any(token in rna_status for token in ("NOT_DETECTED", "NEGATIVE")):
+        negative_status = rna_status in {"RNA_NEGATIVE", "NEGATIVE", "NEGATIVE_EVALUABLE"} or rna_status.startswith("NEGATIVE_")
+        if "UNASSESSED" in rna_state and negative_status:
             missing_as_negative.append(str(row.get("peptide_id") or ""))
         missing_safety = str(row.get("safety_missing_layers") or row.get("event_safety_missing_layers") or "").strip()
         safety = str(row.get("safety_state") or row.get("safety_status") or "").upper()

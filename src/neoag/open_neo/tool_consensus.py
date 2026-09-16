@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -513,3 +515,20 @@ def enrich_all_tool_results(path: str | Path, consensus_summary: str | Path) -> 
         for domain, status in statuses.items():
             row[f"{domain}_consensus_status"] = status
     write_tsv(target, rows)
+    manifest_path = target.with_name("all_tool_results.manifest.json")
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        digest = hashlib.sha256()
+        with target.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        output = manifest.setdefault("output", {})
+        output["sha256"] = digest.hexdigest()
+        output["size_bytes"] = target.stat().st_size
+        output["rows"] = len(rows)
+        output["columns"] = len(rows[0]) if rows else 0
+        manifest["post_ranking_consensus_enriched"] = True
+        manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")

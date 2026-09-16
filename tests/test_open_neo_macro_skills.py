@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import os
@@ -35,7 +36,7 @@ from neoag.open_neo.auto_config import configure_machine
 from neoag.open_neo.cli import build_parser
 from neoag.open_neo.review import _event_kind, _merge_review_context, build_review_rows, run_review, select_first_batch
 from neoag.vaccine_events import build_vaccine_event_tables
-from neoag.open_neo.review_integrity import audit_review_inputs
+from neoag.open_neo.review_integrity import _manifest_hash_records, audit_review_inputs
 from neoag.open_neo.routing import inspect_manifest
 from neoag.open_neo.run import run_open_neo
 from neoag.open_neo.public_assets import _download, _extract_split_archive, _normalize_hf_endpoint, sync_public_assets
@@ -46,7 +47,7 @@ from neoag.open_neo.rna_fusion_splice_profile import (
     generate_rna_fusion_splice_manifest,
     is_rna_fastq_profile_candidate,
 )
-from neoag.open_neo.tool_consensus import build_tool_consensus
+from neoag.open_neo.tool_consensus import build_tool_consensus, enrich_all_tool_results
 from neoag.open_neo.output_layout import materialize_output_view
 from neoag.production_runner import load_production_manifest, run_production
 from neoag.sample_identity.bam_matcher import parse_bam_matcher_short
@@ -1055,6 +1056,30 @@ def test_tool_consensus_emits_domain_outputs(tmp_path: Path):
     assert Path(outputs["tool_evidence.long.tsv"]).is_file()
 
 
+def test_enrich_all_tool_results_refreshes_manifest_hash(tmp_path: Path):
+    evidence = tmp_path / "all_tool_results.tsv"
+    evidence.write_text("canonical_record_id\tevidence_domain\nR1\tpresentation\n", encoding="utf-8")
+    manifest = evidence.with_name("all_tool_results.manifest.json")
+    manifest.write_text(json.dumps({"output": {"path": str(evidence), "sha256": "0" * 64}}), encoding="utf-8")
+    summary = tmp_path / "tool_consensus_summary.tsv"
+    summary.write_text("evidence_domain\tconsensus_status\npresentation\tCONSISTENT\n", encoding="utf-8")
+
+    enrich_all_tool_results(evidence, summary)
+
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    assert payload["output"]["sha256"] == hashlib.sha256(evidence.read_bytes()).hexdigest()
+    assert payload["output"]["size_bytes"] == evidence.stat().st_size
+    assert payload["post_ranking_consensus_enriched"] is True
+
+
+def test_manifest_hash_records_ignore_non_hash_sentinels():
+    value = {
+        "large": {"path": "/large.tsv", "sha256": "not_computed"},
+        "valid": {"path": "/valid.tsv", "sha256": "A" * 64},
+    }
+    assert _manifest_hash_records(value) == [("/valid.tsv", "a" * 64)]
+
+
 def test_rna_preprocessing_plans_gene_transcript_tpm_and_alt_vaf(tmp_path: Path):
     fastq1 = tmp_path / "tumor_R1.fastq.gz"
     fastq2 = tmp_path / "tumor_R2.fastq.gz"
@@ -1700,9 +1725,9 @@ def _write_review_fixture(root: Path) -> None:
         "peptide_id\tefficacy_score\tfinal_priority\nP1\t0.8\tB\nP2\t0.7\tC\n", encoding="utf-8"
     )
     (scoring / "ranked_peptides.evidence_consensus.tsv").write_text(
-        "evidence_rank\tpeptide_id\tevent_id\tevent_type\tgene\tpeptide\thla_allele\tevidence_grade\tpareto_front\trna_support_state\tsafety_state\tpresentation_consensus_state\tmutant_specificity_state\tclonality_state\tccf_confidence\thla_appm_state\tevidence_completeness_state\thard_failure\n"
-        "1\tP1\tE1\tSNV\tGENE1\tSYFPEITHI\tHLA-A*02:01\tR1\t1\tRNA_CONFIRMED\tSAFETY_PASS\tPRESENTATION_CONSISTENT_STRONG\tMT_SPECIFIC\tCLONAL_LIKE\thigh\tHLA_APPM_RETAINED\tCOMPLETE\tno\n"
-        "2\tP2\tE2\tfusion\tGENE2::GENE3\tABCDEFGHI\tHLA-B*07:02\tR3\t1\tRNA_UNASSESSED\tSAFETY_PARTIAL\tPRESENTATION_SINGLE_TOOL\tNOVEL_JUNCTION\tunresolved\tlow\tHLA_LOH_UNASSESSED\tPARTIAL\tno\n",
+        "evidence_rank\tpeptide_id\tevent_id\tevent_type\tgene\tpeptide\thla_allele\tevidence_grade\tpareto_front\trna_support_state\trna_support_status\tsafety_state\tpresentation_consensus_state\tmutant_specificity_state\tclonality_state\tccf_confidence\thla_appm_state\tevidence_completeness_state\thard_failure\n"
+        "1\tP1\tE1\tSNV\tGENE1\tSYFPEITHI\tHLA-A*02:01\tR1\t1\tRNA_CONFIRMED\tRNA_ALT_DETECTED\tSAFETY_PASS\tPRESENTATION_CONSISTENT_STRONG\tMT_SPECIFIC\tCLONAL_LIKE\thigh\tHLA_APPM_RETAINED\tCOMPLETE\tno\n"
+        "2\tP2\tE2\tfusion\tGENE2::GENE3\tABCDEFGHI\tHLA-B*07:02\tR3\t1\tRNA_UNASSESSED\tRNA_ALT_NOT_DETECTED\tSAFETY_PARTIAL\tPRESENTATION_SINGLE_TOOL\tNOVEL_JUNCTION\tunresolved\tlow\tHLA_LOH_UNASSESSED\tPARTIAL\tno\n",
         encoding="utf-8",
     )
     (scoring / "all_tool_results.tsv").write_text((scoring / "ranked_peptides.evidence_consensus.tsv").read_text(encoding="utf-8"), encoding="utf-8")
