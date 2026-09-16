@@ -56,7 +56,7 @@ def test_patient_report_is_plain_language(tmp_path):
     assert "进入本表不等于自动升级为R1/R2" in text
     assert "事件级证据与下一步" in text
     assert "肽级证据与缺口" in text
-    section6 = text.split("6. 人工复核候选事件的综合证据与实验建议（按突变/生物学事件去重后1个）", 1)[1].split("7. 分析方法与工具状态", 1)[0]
+    section6 = text.split("6. mRNA疫苗组合候选事件与实验建议（跨赛道平衡选择后1个）", 1)[1].split("7. 分析方法与工具状态", 1)[0]
     assert "<th>突变/事件</th>" in section6
     assert "<th>组合概览</th>" in section6
     assert "<th>代表肽-HLA</th>" in section6
@@ -73,7 +73,7 @@ def test_patient_report_is_plain_language(tmp_path):
     assert "RNA VAF 0.2000" in text
     assert "5. 当前进入人工复核的疫苗候选事件（按突变/生物学事件去重后1个）" in text
     assert "当前展示1个去重候选事件" in text
-    candidate_section = text.split("5. 当前进入人工复核的疫苗候选事件（按突变/生物学事件去重后1个）", 1)[1].split("6. 人工复核候选事件的综合证据与实验建议（按突变/生物学事件去重后1个）", 1)[0]
+    candidate_section = text.split("5. 当前进入人工复核的疫苗候选事件（按突变/生物学事件去重后1个）", 1)[1].split("6. mRNA疫苗组合候选事件与实验建议（跨赛道平衡选择后1个）", 1)[0]
     assert "<th>事件级证据与下一步</th>" in candidate_section
     assert "<th>肽级证据与缺口</th>" in candidate_section
     assert "<th>关键证据</th>" not in candidate_section
@@ -193,10 +193,40 @@ def test_patient_top_candidates_include_non_r4_technical_review_rows(tmp_path):
     assert "G99" in section
     assert "G100" not in section
 
-    interpretation = text.split("6. 人工复核候选事件的综合证据与实验建议（按突变/生物学事件去重后20个）", 1)[1].split("7. 分析方法与工具状态", 1)[0]
+    interpretation = text.split("6. mRNA疫苗组合候选事件与实验建议（跨赛道平衡选择后20个）", 1)[1].split("7. 分析方法与工具状态", 1)[0]
     assert interpretation.count("<tr>") - 1 == 20
     assert ">G19</td>" in interpretation
     assert "<td>G20</td>" not in interpretation
+
+def test_patient_vaccine_portfolio_balances_eligible_tracks_without_cross_track_rank(tmp_path):
+    bundle = _bundle()
+    bundle.events = []
+    bundle.peptides = []
+    for track, prefix in (("InDel", "I"), ("SNV", "S")):
+        for index in range(12):
+            event_id = f"{prefix}{index}"
+            bundle.events.append({
+                "event_id": event_id, "gene": event_id, "event_type": track,
+                "best_evidence_grade": "R3",
+            })
+            bundle.peptides.append({
+                "peptide_id": f"P{event_id}", "event_id": event_id,
+                "gene": event_id, "event_type": track, "peptide": "ABCDEFGHI",
+                "hla_allele": "HLA-A*02:01", "evidence_grade": "R3",
+            })
+    bundle.validation_rows = []
+    out = tmp_path / "patient_balanced_portfolio.html"
+    make_patient_report(out, bundle, candidate_top_n=24)
+    text = out.read_text(encoding="utf-8")
+    section = text.split(
+        "6. mRNA疫苗组合候选事件与实验建议（跨赛道平衡选择后20个）", 1,
+    )[1].split("7. 分析方法与工具状态", 1)[0]
+    assert section.count("InDel #") == 10
+    assert section.count("SNV #") == 10
+    assert "<th>排名</th>" not in section
+    assert "<th>赛道内排名</th>" in section
+    assert "不同赛道不计算统一总分" in section
+
 
 
 def test_splice_dna_evidence_does_not_render_placeholder_vcf_zero():
@@ -481,7 +511,7 @@ def test_patient_candidate_section_keeps_distinct_events_with_same_peptide_hla(t
     make_patient_report(out, bundle, candidate_top_n=100)
     text = out.read_text(encoding="utf-8")
     assert "疫苗候选事件（按突变/生物学事件去重后2个）" in text
-    assert "人工复核候选事件的综合证据与实验建议（按突变/生物学事件去重后2个）" in text
+    assert "mRNA疫苗组合候选事件与实验建议（跨赛道平衡选择后2个）" in text
     assert "Top 100" not in text
     assert "前20项" not in text
     section = text.split("<h3>当前展示2个去重候选事件</h3>", 1)[1].split("</table>", 1)[0]
@@ -506,7 +536,7 @@ def test_patient_interpretation_groups_all_neoepitopes_under_one_event(tmp_path)
     make_patient_report(out, bundle, candidate_top_n=20)
     text = out.read_text(encoding="utf-8")
     section = text.split(
-        "6. 人工复核候选事件的综合证据与实验建议（按突变/生物学事件去重后1个）", 1
+        "6. mRNA疫苗组合候选事件与实验建议（跨赛道平衡选择后1个）", 1
     )[1].split("7. 分析方法与工具状态", 1)[0]
     assert section.count("<tr>") - 1 == 2
     assert "1个epitope family、2个组合" in section
@@ -516,14 +546,14 @@ def test_patient_interpretation_groups_all_neoepitopes_under_one_event(tmp_path)
     assert "ABCDEFGHI / HLA-A*02:01" in section
     assert "BCDEFGHIJ / HLA-B*07:02" in section
     assert "同一事件，沿用首行综合证据" not in section
-    assert "本表是第5节候选事件的行动摘要子集" in section
+    assert "本表沿用第5节完全相同的事件去重、epitope family和代表肽选择结果" in section
     assert "证据等级与关键定量值" in section
     assert "事件级判断" in section
     assert "肽级证据缺口" in section
     assert "综合证据/为什么值得关注" not in section
     assert "当前不确定性" not in section
     assert "证据等级 R3" in section
-    assert "沿用完全相同的事件去重、epitope family和代表肽选择结果" in section
+    assert "不同赛道不计算统一总分" in section
 
 
 def test_patient_event_representatives_do_not_use_r4_peptides_as_padding():
@@ -570,7 +600,7 @@ def test_patient_interpretation_does_not_merge_hidden_r4_advice(tmp_path):
     out = tmp_path / "patient_no_hidden_r4_advice.html"
     make_patient_report(out, bundle, candidate_top_n=20)
     text = out.read_text(encoding="utf-8")
-    section = text.split("6. 人工复核候选事件的综合证据与实验建议", 1)[1].split(
+    section = text.split("6. mRNA疫苗组合候选事件与实验建议", 1)[1].split(
         "7. 分析方法与工具状态", 1,
     )[0]
     assert "ABCDEFGHI / HLA-A*02:01" in section

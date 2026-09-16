@@ -2645,6 +2645,54 @@ def _patient_representatives(rows: list[dict[str, str]], limit: int, track: str 
     return selected
 
 
+_PATIENT_PORTFOLIO_TRACK_ORDER = ("SNV", "InDel", "Fusion", "Splice", "DNA SV", "Other")
+
+
+def _patient_track_rank_labels(rows: list[dict[str, str]]) -> dict[int, str]:
+    """Label candidates within their own evidence track, never across tracks."""
+    counts: dict[str, int] = {}
+    labels: dict[int, str] = {}
+    for row in rows:
+        track = _patient_track(row)
+        counts[track] = counts.get(track, 0) + 1
+        labels[id(row)] = f"{track} #{counts[track]}"
+    return labels
+
+
+def _patient_balanced_portfolio(
+    rows: list[dict[str, str]], limit: int = 20,
+) -> list[dict[str, str]]:
+    """Build a deterministic cross-track portfolio without cross-track scoring.
+
+    Rows must already have passed the shared evidence gate and be ordered within
+    each track.  Round-robin selection gives every eligible track an equal
+    opportunity; exhausted tracks simply yield their places to the remainder.
+    """
+    if limit < 1:
+        return []
+    buckets: dict[str, list[dict[str, str]]] = {}
+    for row in rows:
+        buckets.setdefault(_patient_track(row), []).append(row)
+    ordered_tracks = [track for track in _PATIENT_PORTFOLIO_TRACK_ORDER if buckets.get(track)]
+    ordered_tracks.extend(sorted(track for track in buckets if track not in ordered_tracks))
+    offsets = {track: 0 for track in ordered_tracks}
+    selected: list[dict[str, str]] = []
+    while len(selected) < limit:
+        added = False
+        for track in ordered_tracks:
+            offset = offsets[track]
+            if offset >= len(buckets[track]):
+                continue
+            selected.append(buckets[track][offset])
+            offsets[track] = offset + 1
+            added = True
+            if len(selected) >= limit:
+                break
+        if not added:
+            break
+    return selected
+
+
 def _patient_event_keys(row: Mapping[str, Any]) -> list[str]:
     keys: list[str] = []
     for value in (row.get("event_group_id"), row.get("event_id"), row.get("source_event_id")):
@@ -6290,6 +6338,7 @@ def make_patient_report(
         row for row in all_representatives
         if patient_top_eligible(row)
     ]
+    track_rank_labels = _patient_track_rank_labels(patient_representatives)
     top = patient_representatives[:candidate_top_n]
     event_group_cache = _patient_event_group_cache(top, ranked)
     paused_representatives = [row for row in all_representatives if not patient_top_eligible(row)]
@@ -6595,7 +6644,7 @@ def make_patient_report(
             for subrank, representative in enumerate(representatives, 1):
                 peptide_grade = str(representative.get("evidence_grade") or "UNASSESSED")
                 event_rows.append({
-                    "排名": rank,
+                    "赛道内排名": track_rank_labels[id(row)],
                     "突变/事件": event_name,
                     "类型": _patient_track(row),
                     "组合概览": (
@@ -6614,7 +6663,7 @@ def make_patient_report(
         return result
 
     candidate_headers = [
-        "排名", "突变/事件", "类型", "组合概览", "代表肽-HLA", "肽级定量证据", "等级",
+        "赛道内排名", "突变/事件", "类型", "组合概览", "代表肽-HLA", "肽级定量证据", "等级",
         "事件级证据与下一步", "肽级证据与缺口",
     ]
     out.append(
@@ -6626,17 +6675,19 @@ def make_patient_report(
         "仍需完成指定确认步骤，R3-GAP表示关键资料缺失，R3-REVIEW表示证据冲突或伪影风险需人工复核。"
         "仅纳入身份可追溯的非R4候选；R4、硬失败或明确不推进的候选保留在技术审阅池，不进入本表。"
         "本表用于研究性候选审阅，不表示已经确认新抗原或可直接进入功能实验。"
-        "本表的纳入、阻断、等级和下一步仅由当前证据共识合同生成；旧加权优先级仅保留在技术比较附件，不参与患者版决策。</p>"
+        "候选仅在各自赛道内编号，不进行跨赛道优劣排序；本表的纳入、阻断、等级和下一步仅由当前证据共识合同生成；"
+        "旧加权优先级仅保留在技术比较附件，不参与患者版决策。</p>"
     )
     out.append(_rowspan_table(
         patient_candidate_rows(top),
         candidate_headers,
-        ("排名", "突变/事件", "类型", "组合概览", "事件级证据与下一步"),
+        ("赛道内排名", "突变/事件", "类型", "组合概览", "事件级证据与下一步"),
     ))
-    quantitative_rows = [
-        _patient_presentation_quantitative_row(row, index)
-        for index, row in enumerate(top, start=1)
-    ]
+    quantitative_rows = []
+    for row in top:
+        quantitative_row = _patient_presentation_quantitative_row(row, 0)
+        quantitative_row["赛道内排名"] = track_rank_labels[id(row)]
+        quantitative_rows.append(quantitative_row)
     out.append("<h3>呈递与免疫原性定量明细</h3>")
     out.append(
         "<p class='small'>Percentile rank越低表示模型预测越强，便于跨等位基因比较；"
@@ -6644,21 +6695,23 @@ def make_patient_report(
         "若训练覆盖/外推状态未记录，报告保持未评估，不因工具返回数值而推定该HLA属于训练支持等位基因。</p>"
     )
     out.append(_table(quantitative_rows, [
-        "排名", "肽段-HLA", "肽长/变异位置", "NetMHCpan原始值", "MT/WT定量比较",
+        "赛道内排名", "肽段-HLA", "肽长/变异位置", "NetMHCpan原始值", "MT/WT定量比较",
         "突变位置结构解释", "WT自身反应/耐受风险", "MHCflurry原始值", "稳定性",
         "免疫原性辅助模型", "HLA模型覆盖",
     ]))
     out.append(f"<p class='small'>当前暂缓/不推进及完整性门槛未通过的{len(paused_representatives)}个事件代表候选不进入患者版重点表，仅保留在科研技术版审阅池。排序仍采用R1–R4、同赛道Pareto、确定性tie-break和事件去重。</p></div>")
 
-    interpretation_top = top[:20]
+    interpretation_top = _patient_balanced_portfolio(top, 20)
     interpretation_count = len(interpretation_top)
     out.append(
-        "<div class='section'><h2>6. 人工复核候选事件的综合证据与实验建议"
-        f"（按突变/生物学事件去重后{interpretation_count}个）</h2>"
+        "<div class='section'><h2>6. mRNA疫苗组合候选事件与实验建议"
+        f"（跨赛道平衡选择后{interpretation_count}个）</h2>"
     )
     out.append(
-        f"<p>本节解读当前进入人工复核的{interpretation_count}个独立突变/生物学事件。"
-        "本表是第5节候选事件的行动摘要子集，沿用完全相同的事件去重、epitope family和代表肽选择结果，不重新排序或另选肽段。"
+        f"<p>本节从第5节已通过共同证据门槛的候选中构建{interpretation_count}个独立突变/生物学事件的研究性mRNA疫苗组合短名单。"
+        "不同赛道不计算统一总分，也不声明跨赛道优劣；先保持各赛道内部证据顺序，再以公平轮转让每个存在合格候选的赛道获得选择机会，某赛道不足时由其他合格赛道补足。"
+        "R4、hard-fail或来源链未闭环的候选不会为了类型平衡被强行纳入。"
+        "本表沿用第5节完全相同的事件去重、epitope family和代表肽选择结果，不重新评分或另选肽段。"
         "同一事件产生的不同肽长、加工位置和HLA组合统一归入该事件，不重复占据审阅位置；"
         "正文仅展示最多3个决策代表肽，每个代表肽单独占一行，并将事件级判断与肽级证据缺口分开；"
         "完整Peptide-HLA明细继续保留用于呈递和安全性核查。建议顺序：先确认事件和异常转录本真实性，"
@@ -6666,7 +6719,7 @@ def make_patient_report(
         "minigene及T细胞功能实验。</p>"
     )
     interpretation_rows: list[list[dict[str, Any]]] = []
-    for rank, row in enumerate(interpretation_top, 1):
+    for row in interpretation_top:
         event_group = event_group_cache[id(row)]
         epitope_count = event_group["epitope_count"]
         family_count = event_group["epitope_family_count"]
@@ -6682,7 +6735,7 @@ def make_patient_report(
             gap_summary = "；".join(representative_gaps) or "未见明确肽级阻断项；仍需实验确认"
             peptide_grade = str(representative.get("evidence_grade") or "UNASSESSED")
             event_rows.append({
-                "排名": rank,
+                "赛道内排名": track_rank_labels[id(row)],
                 "突变/事件": event_name,
                 "改变": _patient_event_change(row),
                 "类型": _patient_track(row),
@@ -6701,13 +6754,13 @@ def make_patient_report(
             })
         interpretation_rows.append(event_rows)
     comprehensive_headers = [
-        "排名", "突变/事件", "改变", "类型", "组合概览", "代表肽-HLA",
+        "赛道内排名", "突变/事件", "改变", "类型", "组合概览", "代表肽-HLA",
         "证据等级与关键定量值", "事件级判断", "肽级证据缺口", "建议下一步",
     ]
     out.append(_rowspan_table(
         interpretation_rows,
         comprehensive_headers,
-        ("排名", "突变/事件", "改变", "类型", "组合概览", "事件级判断"),
+        ("赛道内排名", "突变/事件", "改变", "类型", "组合概览", "事件级判断"),
     ))
     out.append("</div>")
 
