@@ -6658,8 +6658,10 @@ def make_patient_report(
     )
     out.append(
         f"<p>本节解读当前进入人工复核的{interpretation_count}个独立突变/生物学事件。"
+        "本表是第5节候选事件的行动摘要子集，沿用完全相同的事件去重、epitope family和代表肽选择结果，不重新排序或另选肽段。"
         "同一事件产生的不同肽长、加工位置和HLA组合统一归入该事件，不重复占据审阅位置；"
-        "正文按epitope family仅展示最多3个决策代表肽，每个代表肽单独占一行；完整Peptide-HLA明细继续保留用于呈递和安全性核查。建议顺序：先确认事件和异常转录本真实性，"
+        "正文仅展示最多3个决策代表肽，每个代表肽单独占一行，并将事件级判断与肽级证据缺口分开；"
+        "完整Peptide-HLA明细继续保留用于呈递和安全性核查。建议顺序：先确认事件和异常转录本真实性，"
         "再补RNA alt/VAF或精确junction证据，完成MT/WT、正常背景和限制性HLA复核，最后开展短肽、长肽、"
         "minigene及T细胞功能实验。</p>"
     )
@@ -6670,12 +6672,15 @@ def make_patient_report(
         family_count = event_group["epitope_family_count"]
         representatives = event_group["representative_rows"] or [row]
         event_name = row.get("gene", "") or row.get("event_name", "") or row.get("event_id", "")
+        event_grade = _patient_event_row_grade(row, event_grade_map)
+        event_judgment = _patient_candidate_attention(row, bundle)
         event_rows: list[dict[str, Any]] = []
         for subrank, representative in enumerate(representatives, 1):
             representative_gaps = list(dict.fromkeys(
                 gap for gap in _patient_key_gaps(representative, bundle) if gap
             ))
             gap_summary = "；".join(representative_gaps) or "未见明确肽级阻断项；仍需实验确认"
+            peptide_grade = str(representative.get("evidence_grade") or "UNASSESSED")
             event_rows.append({
                 "排名": rank,
                 "突变/事件": event_name,
@@ -6686,20 +6691,23 @@ def make_patient_report(
                     if subrank == 1 else "同一事件"
                 ),
                 "代表肽-HLA": _patient_representative_peptide_identity(representative),
-                "肽级定量证据": _patient_representative_peptide_evidence(representative),
-                "综合证据/为什么值得关注": _patient_candidate_attention(row, bundle),
-                "当前不确定性": gap_summary,
+                "证据等级与关键定量值": (
+                    f"事件 {event_grade}；肽 {peptide_grade}；"
+                    f"{_patient_representative_peptide_evidence(representative)}"
+                ),
+                "事件级判断": event_judgment,
+                "肽级证据缺口": gap_summary,
                 "建议下一步": _patient_validation(representative, val_map),
             })
         interpretation_rows.append(event_rows)
     comprehensive_headers = [
-        "排名", "突变/事件", "改变", "类型", "组合概览", "代表肽-HLA", "肽级定量证据",
-        "综合证据/为什么值得关注", "当前不确定性", "建议下一步",
+        "排名", "突变/事件", "改变", "类型", "组合概览", "代表肽-HLA",
+        "证据等级与关键定量值", "事件级判断", "肽级证据缺口", "建议下一步",
     ]
     out.append(_rowspan_table(
         interpretation_rows,
         comprehensive_headers,
-        ("排名", "突变/事件", "改变", "类型", "综合证据/为什么值得关注"),
+        ("排名", "突变/事件", "改变", "类型", "组合概览", "事件级判断"),
     ))
     out.append("</div>")
 

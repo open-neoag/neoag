@@ -60,9 +60,9 @@ def test_patient_report_is_plain_language(tmp_path):
     assert "<th>突变/事件</th>" in section6
     assert "<th>组合概览</th>" in section6
     assert "<th>代表肽-HLA</th>" in section6
-    assert "<th>肽级定量证据</th>" in section6
-    assert "<th>综合证据/为什么值得关注</th>" in section6
-    assert "<th>当前不确定性</th>" in section6
+    assert "<th>证据等级与关键定量值</th>" in section6
+    assert "<th>事件级判断</th>" in section6
+    assert "<th>肽级证据缺口</th>" in section6
     assert "<th>建议下一步</th>" in section6
     assert "Safety-focused validation before efficacy assay" not in section6
     assert "<th>呈递工具</th>" not in section6
@@ -516,8 +516,14 @@ def test_patient_interpretation_groups_all_neoepitopes_under_one_event(tmp_path)
     assert "ABCDEFGHI / HLA-A*02:01" in section
     assert "BCDEFGHIJ / HLA-B*07:02" in section
     assert "同一事件，沿用首行综合证据" not in section
+    assert "本表是第5节候选事件的行动摘要子集" in section
+    assert "证据等级与关键定量值" in section
+    assert "事件级判断" in section
+    assert "肽级证据缺口" in section
+    assert "综合证据/为什么值得关注" not in section
+    assert "当前不确定性" not in section
     assert "证据等级 R3" in section
-    assert "同一事件产生的不同肽长、加工位置和HLA组合统一归入该事件" in text
+    assert "沿用完全相同的事件去重、epitope family和代表肽选择结果" in section
 
 
 def test_patient_event_representatives_do_not_use_r4_peptides_as_padding():
