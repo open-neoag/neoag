@@ -53,11 +53,13 @@ def test_patient_report_is_plain_language(tmp_path):
     assert "重点变异事件（按类型、按事件去重）" in text
     assert "关键人工审阅事件" in text
     assert "进入本表不等于自动升级为R1/R2" in text
-    assert "关键证据与下一步" in text
+    assert "事件级证据与下一步" in text
+    assert "肽级证据与缺口" in text
     section6 = text.split("6. 人工复核候选事件的综合证据与实验建议（按突变/生物学事件去重后1个）", 1)[1].split("7. 分析方法与工具状态", 1)[0]
     assert "<th>突变/事件</th>" in section6
     assert "<th>组合概览</th>" in section6
     assert "<th>代表肽-HLA</th>" in section6
+    assert "<th>肽级定量证据</th>" in section6
     assert "<th>综合证据/为什么值得关注</th>" in section6
     assert "<th>当前不确定性</th>" in section6
     assert "<th>建议下一步</th>" in section6
@@ -71,7 +73,8 @@ def test_patient_report_is_plain_language(tmp_path):
     assert "5. 当前进入人工复核的疫苗候选事件（按突变/生物学事件去重后1个）" in text
     assert "当前展示1个去重候选事件" in text
     candidate_section = text.split("5. 当前进入人工复核的疫苗候选事件（按突变/生物学事件去重后1个）", 1)[1].split("6. 人工复核候选事件的综合证据与实验建议（按突变/生物学事件去重后1个）", 1)[0]
-    assert "<th>关键证据与下一步</th>" in candidate_section
+    assert "<th>事件级证据与下一步</th>" in candidate_section
+    assert "<th>肽级证据与缺口</th>" in candidate_section
     assert "<th>关键证据</th>" not in candidate_section
     assert "<th>主要限制</th>" not in candidate_section
     assert "<th>建议实验</th>" not in candidate_section
@@ -2301,6 +2304,18 @@ def test_resumed_result_recovers_case_metadata_purity_and_hla_loh(tmp_path):
     (hla_root / "spechla_hla_loh.tsv").write_text(
         "hla_allele\tloh_status\tevidence_tool\nHLA-A*02:01\tno\tspechla\n", encoding="utf-8",
     )
+    appm_root = case_root / "appm"
+    appm_root.mkdir()
+    (appm_root / "appm_summary.tsv").write_text(
+        "sample_id\tmhc_i_integrity_score\tmhc_ii_integrity_score\tifng_response_score\tmhc_i_integrity_status\tmhc_ii_integrity_status\tifng_response_status\tappm_evidence_completeness\tappm_evidence_completeness_score\tfunctional_validation_status\tvalidation_evidence_source\n"
+        "CASE01\t1.0\t1.0\t0.65\tMHC_I_INTACT\tMHC_II_INTACT\tIFNG_RESPONSE_CAUTION\tPARTIAL\t0.4286\tcomputational_proxy\tDNA_CNV_RNA_HLA_LOH_only\n",
+        encoding="utf-8",
+    )
+    (appm_root / "appm_evidence_completeness.tsv").write_text(
+        "sample_id\tappm_evidence_completeness_score\tappm_evidence_completeness_status\tmissing_evidence\n"
+        "CASE01\t0.4286\tPARTIAL\tmutation;protein;flow;ligandome\n",
+        encoding="utf-8",
+    )
     evidence = result_root / "all_tool_results.tsv"
     evidence.write_text(
         "peptide_id\tevent_id\tpeptide\thla_allele\tevidence_grade\nP1\tE1\tAAAAAAAAA\tHLA-A*02:01\tR3\n",
@@ -2336,3 +2351,10 @@ def test_resumed_result_recovers_case_metadata_purity_and_hla_loh(tmp_path):
     assert "3.0-alpha1" in text
     assert evidence_sha in text
     assert "仅SpecHLA报告未提示LOH，证据有限" in text
+    assert "现有结果未发现HLA-I呈递系统整体完全丧失" in text
+    assert "IFNG/JAK-STAT应答存在谨慎信号" in text
+    assert "证据部分完整" in text
+    assert "计算评分 0.6500" in text
+    assert "计算评分 0.4286" in text
+    assert "mutation、protein、flow、ligandome" in text
+    assert "computational_proxy" in text

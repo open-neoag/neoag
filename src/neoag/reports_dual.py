@@ -1968,24 +1968,39 @@ def load_report_bundle(
             "expected_sha256": expected_sha256,
             "actual_sha256": actual_sha256,
         }
+
+    def case_file(*relative_paths: str) -> Path | None:
+        return _first_existing([
+            case_root / relative
+            for case_root in _report_case_roots(root)
+            for relative in relative_paths
+        ])
+
+    recovered_appm_rows = _read_optional(case_file("appm/appm_summary.tsv"))
+    effective_appm_summary = dict(appm_summary or (recovered_appm_rows[0] if recovered_appm_rows else {}))
+    recovered_appm_completeness = _read_optional(case_file("appm/appm_evidence_completeness.tsv"))
+    if recovered_appm_completeness:
+        for key, value in recovered_appm_completeness[0].items():
+            if value not in (None, ""):
+                effective_appm_summary.setdefault(key, value)
     return ReportBundle(
         profile=profile,
         events=enriched_events,
         peptides=enriched_peptides,
-        appm_summary=appm_summary or {},
+        appm_summary=effective_appm_summary,
         validation_rows=validation_rows or [],
         sample_id=sample_id or str(prov.get("sample_id") or (peptides[0].get("sample_id") if peptides else "")),
         entry_mode=entry_mode or str(prov.get("entry_mode") or ""),
         provenance=prov,
         peptide_safety=_read_optional(p("safety", "peptide_safety.tsv") if root else None),
-        peptide_escape_flags=_read_optional(p("immune_escape", "peptide_escape_flags.tsv") if root else None),
-        immune_escape_summary=_read_optional(p("immune_escape", "immune_escape_summary.tsv") if root else None),
+        peptide_escape_flags=_read_optional(case_file("immune_escape/peptide_escape_flags.tsv")),
+        immune_escape_summary=_read_optional(case_file("immune_escape/immune_escape_summary.tsv")),
         ccf=_read_optional(p("clonality", "ccf_2.tsv") if root else None) or _read_optional(p("clonality", "ccf_lite.tsv") if root else None),
-        appm_gene_status=_read_optional(p("appm", "appm_gene_status.tsv") if root else None),
-        appm_peptide_modifiers=_read_optional(p("appm", "appm_peptide_modifiers.tsv") if root else None),
-        appm_module_scores=_read_optional(p("appm", "appm_module_scores.tsv") if root else None),
-        appm_submodule_scores=_read_optional(p("appm", "appm_submodule_scores.tsv") if root else None),
-        appm_conflicts=_read_optional(p("appm", "appm_conflicts.tsv") if root else None),
+        appm_gene_status=_read_optional(case_file("appm/appm_gene_status.tsv")),
+        appm_peptide_modifiers=_read_optional(case_file("appm/appm_peptide_modifiers.tsv")),
+        appm_module_scores=_read_optional(case_file("appm/appm_module_scores.tsv", "appm/appm_pathway_status.tsv")),
+        appm_submodule_scores=_read_optional(case_file("appm/appm_submodule_scores.tsv")),
+        appm_conflicts=_read_optional(case_file("appm/appm_conflicts.tsv")),
         wes_qc=_read_optional(p("qc", "wes", "wes_qc.tsv") if root else None),
         wes_wgs_coding_summary=_read_optional(
             p("qc", "wes_wgs_coding_comparison", "wes_wgs_coding_summary.tsv") if root else None
@@ -2801,6 +2816,16 @@ def _patient_representative_peptide_sort_key(row: Mapping[str, Any]) -> tuple[An
 def _patient_representative_peptide_display(row: Mapping[str, Any]) -> str:
     peptide = str(row.get("peptide") or row.get("mutant_peptide") or "未记录")
     hla = str(row.get("hla_allele") or row.get("hla") or "未记录")
+    return f"{peptide} / {hla}（{_patient_representative_peptide_evidence(row)}）"
+
+
+def _patient_representative_peptide_identity(row: Mapping[str, Any]) -> str:
+    peptide = str(row.get("peptide") or row.get("mutant_peptide") or "未记录")
+    hla = str(row.get("hla_allele") or row.get("hla") or "未记录")
+    return f"{peptide} / {hla}"
+
+
+def _patient_representative_peptide_evidence(row: Mapping[str, Any]) -> str:
     grade = str(row.get("evidence_grade") or row.get("event_evidence_grade") or "UNASSESSED")
     net_rank = _patient_numeric_display(
         _patient_first_observed(row, "netmhcpan_mt_rank_el", "netmhcpan_el_rank", "el_rank"), 4,
@@ -2822,7 +2847,40 @@ def _patient_representative_peptide_display(row: Mapping[str, Any]) -> str:
         f"稳定性rank {stability}%" if stability is not None else "稳定性未评估",
         f"MT/WT差值 {mt_wt}" if mt_wt is not None else "MT/WT未评估",
     ]
-    return f"{peptide} / {hla}（证据等级 {grade}，{'，'.join(metrics)}）"
+    return f"证据等级 {grade}，{'，'.join(metrics)}"
+
+
+def _patient_peptide_evidence_and_gaps(
+    row: Mapping[str, Any],
+    bundle: ReportBundle,
+    val_map: Mapping[str, Mapping[str, str]],
+) -> str:
+    """Keep peptide-specific interpretation separate from shared event evidence."""
+    evidence = [
+        _patient_presentation_metric(row),
+        _patient_metric("MT/WT", row, "mutant_specificity_status", "mutant_specificity_state"),
+    ]
+    gaps: list[str] = []
+    restricting_hla_gap = _patient_restricting_hla_gap(row, bundle)
+    if restricting_hla_gap:
+        gaps.append(restricting_hla_gap)
+    safety_gap = _patient_safety_gap(row)
+    if safety_gap:
+        gaps.append(safety_gap)
+    appm_status = _patient_candidate_appm_status(bundle)
+    if appm_status == "未评估":
+        gaps.append("APPM未评估")
+    elif appm_status.startswith("证据部分完整"):
+        gaps.append("APPM仅部分评估")
+    conflict = _patient_conflict_summary(row)
+    if conflict:
+        gaps.append("肽级证据冲突：" + conflict)
+    gap_text = "；".join(dict.fromkeys(gaps)) or "未见已记录的肽级阻断项；仍需实验确认"
+    return (
+        "；".join(evidence)
+        + "。肽级缺口：" + gap_text
+        + "。肽级下一步：" + _patient_validation(row, val_map)
+    )
 
 
 def _patient_event_group_cache(
@@ -5869,20 +5927,40 @@ def _patient_hla_loh_consensus(bundle: ReportBundle) -> tuple[list[dict[str, str
 def _patient_appm_rows(bundle: ReportBundle) -> list[dict[str, str]]:
     summary = bundle.appm_summary
     dimensions = [
-        ("MHC-I核心", "mhc_i_integrity_status"),
-        ("MHC-II背景", "mhc_ii_integrity_status"),
-        ("IFNG/JAK-STAT", "ifng_response_status"),
-        ("APPM证据完整度", "appm_evidence_completeness"),
+        ("MHC-I核心", "mhc_i_integrity_status", "mhc_i_integrity_score"),
+        ("MHC-II背景", "mhc_ii_integrity_status", "mhc_ii_integrity_score"),
+        ("IFNG/JAK-STAT", "ifng_response_status", "ifng_response_score"),
+        ("APPM证据完整度", "appm_evidence_completeness", "appm_evidence_completeness_score"),
     ]
     rows = []
-    for label, key in dimensions:
+    evidence_source = str(summary.get("validation_evidence_source") or "")
+    functional_status = str(summary.get("functional_validation_status") or "")
+    missing_evidence = str(summary.get("missing_evidence") or "")
+    for label, key, score_key in dimensions:
         status = str(summary.get(key) or "UNASSESSED")
+        score = _float_or_none(summary.get(score_key))
+        score_suffix = f"（计算评分 {score:.4f}）" if score is not None else ""
         if label == "MHC-I核心" and status.upper() == "MHC_I_INTACT":
-            result = "现有结果未发现HLA-I呈递系统整体完全丧失，肿瘤可能仍保留一定呈递能力；但抗原加工环节和HLA-LOH证据尚不完整。"
+            result = (
+                "现有结果未发现HLA-I呈递系统整体完全丧失，肿瘤可能仍保留一定呈递能力；"
+                "但抗原加工环节和HLA-LOH证据尚不完整。" + score_suffix
+            )
             explanation = "这是基于当前计算证据的审慎判断，不表示HLA-I呈递功能已被实验确认完整。"
+        elif label == "APPM证据完整度":
+            result = _patient_status_text(status) + score_suffix
+            if missing_evidence:
+                explanation = f"尚缺证据层：{missing_evidence.replace(';', '、')}。证据部分完整不能作为功能正常或临床敏感的结论。"
+            else:
+                explanation = "证据完整度反映已接入的数据层；未评估不等于正常或阴性。"
         else:
-            result = _patient_status_text(status)
+            result = _patient_status_text(status) + score_suffix
             explanation = "未评估不等于正常或阴性" if status == "UNASSESSED" else "用于判断抗原加工呈递条件，不能单独预测临床疗效"
+        if status != "UNASSESSED" and label != "APPM证据完整度" and (evidence_source or functional_status):
+            evidence_note = "；".join(part for part in [
+                f"证据来源={evidence_source}" if evidence_source else "",
+                f"验证状态={functional_status}" if functional_status else "",
+            ] if part)
+            explanation = f"{explanation}（{evidence_note}）"
         rows.append({"维度": label, "结果": result, "通俗解释": explanation})
     _, hla_loh_consensus = _patient_hla_loh_consensus(bundle)
     rows.append({"维度": "限制性HLA-I LOH", "结果": hla_loh_consensus, "通俗解释": "由LOHHLA与SpecHLA逐等位基因结果形成共识；仅HLA-A/B/C丢失可直接影响相应HLA-I候选"})
@@ -6469,18 +6547,20 @@ def make_patient_report(
                         f"{family_count}个epitope family、{epitope_count}个组合；完整明细见附件"
                         if subrank == 1 else "同一事件"
                     ),
-                    "代表肽-HLA": _patient_representative_peptide_display(representative),
+                    "代表肽-HLA": _patient_representative_peptide_identity(representative),
+                    "肽级定量证据": _patient_representative_peptide_evidence(representative),
                     "等级": f"事件 {event_grade}；肽 {peptide_grade}",
-                    "关键证据与下一步": (
-                        _patient_event_evidence_and_next_step(row, bundle, val_map)
-                        if subrank == 1 else "同一事件，沿用首行事件级证据与建议"
+                    "事件级证据与下一步": _patient_event_evidence_and_next_step(row, bundle, val_map),
+                    "肽级证据与缺口": _patient_peptide_evidence_and_gaps(
+                        representative, bundle, val_map,
                     ),
                 })
             result.append(event_rows)
         return result
 
     candidate_headers = [
-        "排名", "突变/事件", "类型", "组合概览", "代表肽-HLA", "等级", "关键证据与下一步",
+        "排名", "突变/事件", "类型", "组合概览", "代表肽-HLA", "肽级定量证据", "等级",
+        "事件级证据与下一步", "肽级证据与缺口",
     ]
     out.append(
         f"<h3>当前展示{displayed_candidate_count}个去重候选事件</h3>"
@@ -6495,7 +6575,7 @@ def make_patient_report(
     out.append(_rowspan_table(
         patient_candidate_rows(top),
         candidate_headers,
-        ("排名", "突变/事件", "类型", "组合概览"),
+        ("排名", "突变/事件", "类型", "组合概览", "事件级证据与下一步"),
     ))
     quantitative_rows = [
         _patient_presentation_quantitative_row(row, index)
@@ -6561,7 +6641,8 @@ def make_patient_report(
                     f"{family_count}个epitope family、{epitope_count}个组合；完整明细见附件"
                     if subrank == 1 else "同一事件"
                 ),
-                "代表肽-HLA": _patient_representative_peptide_display(representative),
+                "代表肽-HLA": _patient_representative_peptide_identity(representative),
+                "肽级定量证据": _patient_representative_peptide_evidence(representative),
                 "综合证据/为什么值得关注": (
                     _patient_candidate_attention(row, bundle)
                     if subrank == 1 else "同一事件，沿用首行综合证据"
@@ -6571,7 +6652,7 @@ def make_patient_report(
             })
         interpretation_rows.append(event_rows)
     comprehensive_headers = [
-        "排名", "突变/事件", "改变", "类型", "组合概览", "代表肽-HLA",
+        "排名", "突变/事件", "改变", "类型", "组合概览", "代表肽-HLA", "肽级定量证据",
         "综合证据/为什么值得关注", "当前不确定性", "建议下一步",
     ]
     out.append(_rowspan_table(
