@@ -515,7 +515,7 @@ def test_patient_interpretation_groups_all_neoepitopes_under_one_event(tmp_path)
     assert "1.1" not in section and "1.2" not in section
     assert "ABCDEFGHI / HLA-A*02:01" in section
     assert "BCDEFGHIJ / HLA-B*07:02" in section
-    assert "同一事件，沿用首行综合证据" in section
+    assert "同一事件，沿用首行综合证据" not in section
     assert "证据等级 R3" in section
     assert "同一事件产生的不同肽长、加工位置和HLA组合统一归入该事件" in text
 
@@ -536,6 +536,41 @@ def test_patient_event_representatives_do_not_use_r4_peptides_as_padding():
     representatives = cache[id(event)]["representative_rows"]
     assert [row["peptide_id"] for row in representatives] == ["P_R3"]
     assert cache[id(event)]["epitope_count"] == 2
+
+
+def test_patient_interpretation_does_not_merge_hidden_r4_advice(tmp_path):
+    bundle = _bundle()
+    bundle.events = [{
+        "event_id": "E1", "gene": "GENE1", "event_type": "InDel",
+        "best_evidence_grade": "R3", "evidence_missing_layers": "rna",
+    }]
+    common = {
+        "event_id": "E1", "gene": "GENE1", "event_type": "InDel",
+        "peptide_consequence": "frameshift", "rna_support_state": "RNA_UNASSESSED",
+    }
+    bundle.peptides = [
+        {
+            **common, "peptide_id": "P_R3", "peptide": "ABCDEFGHI",
+            "hla_allele": "HLA-A*02:01", "evidence_grade": "R3",
+        },
+        {
+            **common, "peptide_id": "P_R4", "peptide": "BCDEFGHIK",
+            "hla_allele": "HLA-B*07:02", "evidence_grade": "R4",
+        },
+    ]
+    bundle.validation_rows = [{
+        "peptide_id": "P_R4", "validation_strategy": "Do not advance",
+    }]
+    out = tmp_path / "patient_no_hidden_r4_advice.html"
+    make_patient_report(out, bundle, candidate_top_n=20)
+    text = out.read_text(encoding="utf-8")
+    section = text.split("6. 人工复核候选事件的综合证据与实验建议", 1)[1].split(
+        "7. 分析方法与工具状态", 1,
+    )[0]
+    assert "ABCDEFGHI / HLA-A*02:01" in section
+    assert "BCDEFGHIK / HLA-B*07:02" not in section
+    assert "暂缓/不推进" not in section
+    assert "补做RNA位点覆盖与ALT reads/VAF评估" in section
 
 
 def test_patient_event_top_table_uses_event_level_r3_subgrade(tmp_path):

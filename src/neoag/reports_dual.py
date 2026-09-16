@@ -6666,28 +6666,16 @@ def make_patient_report(
     interpretation_rows: list[list[dict[str, Any]]] = []
     for rank, row in enumerate(interpretation_top, 1):
         event_group = event_group_cache[id(row)]
-        evidence_rows = event_group["evidence_rows"]
         epitope_count = event_group["epitope_count"]
         family_count = event_group["epitope_family_count"]
         representatives = event_group["representative_rows"] or [row]
-        gap_values = list(dict.fromkeys(
-            gap
-            for candidate in evidence_rows
-            for gap in _patient_key_gaps(candidate, bundle)
-            if gap
-        ))
-        validation_values = list(dict.fromkeys(
-            advice for advice in (_patient_validation(candidate, val_map) for candidate in evidence_rows) if advice
-        ))
-        gap_summary = "；".join(gap_values[:6]) or "未见明确关键缺口；仍需实验确认"
-        if len(gap_values) > 6:
-            gap_summary += f"；另有{len(gap_values) - 6}类肽段级缺口见明细表"
-        validation_summary = "；".join(validation_values[:4]) or "先确认事件真实性，再设计功能实验"
-        if len(validation_values) > 4:
-            validation_summary += f"；另有{len(validation_values) - 4}类肽段级建议见明细表"
         event_name = row.get("gene", "") or row.get("event_name", "") or row.get("event_id", "")
         event_rows: list[dict[str, Any]] = []
         for subrank, representative in enumerate(representatives, 1):
+            representative_gaps = list(dict.fromkeys(
+                gap for gap in _patient_key_gaps(representative, bundle) if gap
+            ))
+            gap_summary = "；".join(representative_gaps) or "未见明确肽级阻断项；仍需实验确认"
             event_rows.append({
                 "排名": rank,
                 "突变/事件": event_name,
@@ -6699,12 +6687,9 @@ def make_patient_report(
                 ),
                 "代表肽-HLA": _patient_representative_peptide_identity(representative),
                 "肽级定量证据": _patient_representative_peptide_evidence(representative),
-                "综合证据/为什么值得关注": (
-                    _patient_candidate_attention(row, bundle)
-                    if subrank == 1 else "同一事件，沿用首行综合证据"
-                ),
-                "当前不确定性": gap_summary if subrank == 1 else "同一事件，沿用首行不确定性",
-                "建议下一步": validation_summary if subrank == 1 else "同一事件，沿用首行实验建议",
+                "综合证据/为什么值得关注": _patient_candidate_attention(row, bundle),
+                "当前不确定性": gap_summary,
+                "建议下一步": _patient_validation(representative, val_map),
             })
         interpretation_rows.append(event_rows)
     comprehensive_headers = [
@@ -6714,7 +6699,7 @@ def make_patient_report(
     out.append(_rowspan_table(
         interpretation_rows,
         comprehensive_headers,
-        ("排名", "突变/事件", "改变", "类型"),
+        ("排名", "突变/事件", "改变", "类型", "综合证据/为什么值得关注"),
     ))
     out.append("</div>")
 
