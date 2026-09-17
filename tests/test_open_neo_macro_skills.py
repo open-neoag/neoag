@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import os
@@ -34,7 +35,8 @@ from neoag.open_neo.install_check import (
 from neoag.open_neo.auto_config import configure_machine
 from neoag.open_neo.cli import build_parser
 from neoag.open_neo.review import _event_kind, _merge_review_context, build_review_rows, run_review, select_first_batch
-from neoag.open_neo.review_integrity import audit_review_inputs
+from neoag.vaccine_events import build_vaccine_event_tables
+from neoag.open_neo.review_integrity import _manifest_hash_records, audit_review_inputs
 from neoag.open_neo.routing import inspect_manifest
 from neoag.open_neo.run import run_open_neo
 from neoag.open_neo.public_assets import _download, _extract_split_archive, _normalize_hf_endpoint, sync_public_assets
@@ -45,7 +47,7 @@ from neoag.open_neo.rna_fusion_splice_profile import (
     generate_rna_fusion_splice_manifest,
     is_rna_fastq_profile_candidate,
 )
-from neoag.open_neo.tool_consensus import build_tool_consensus
+from neoag.open_neo.tool_consensus import build_tool_consensus, enrich_all_tool_results
 from neoag.open_neo.output_layout import materialize_output_view
 from neoag.production_runner import load_production_manifest, run_production
 from neoag.sample_identity.bam_matcher import parse_bam_matcher_short
@@ -228,7 +230,7 @@ def test_output_view_preserves_native_results_and_groups_deliverables(tmp_path: 
 
     outputs = materialize_output_view(
         result_root,
-        artifacts={"consensus_peptides": str(ranked), "patient_report": str(report)},
+        artifacts={"consensus_peptides": str(ranked), "vaccine_event_candidates": str(ranked), "patient_report": str(report)},
         producer="test",
     )
 
@@ -237,6 +239,7 @@ def test_output_view_preserves_native_results_and_groups_deliverables(tmp_path: 
     assert (view / "04_ranking/scoring").is_symlink()
     assert (view / "05_reports/reports").is_symlink()
     assert (view / "04_ranking/consensus_peptides").is_symlink()
+    assert (view / "04_ranking/vaccine_event_candidates").is_symlink()
     assert (view / "05_reports/patient_report").is_symlink()
     assert ranked.read_text(encoding="utf-8") == "peptide\n"
     assert "consensus_peptides" in Path(outputs["deliverables_index"]).read_text(encoding="utf-8")
@@ -1053,6 +1056,30 @@ def test_tool_consensus_emits_domain_outputs(tmp_path: Path):
     assert Path(outputs["tool_evidence.long.tsv"]).is_file()
 
 
+def test_enrich_all_tool_results_refreshes_manifest_hash(tmp_path: Path):
+    evidence = tmp_path / "all_tool_results.tsv"
+    evidence.write_text("canonical_record_id\tevidence_domain\nR1\tpresentation\n", encoding="utf-8")
+    manifest = evidence.with_name("all_tool_results.manifest.json")
+    manifest.write_text(json.dumps({"output": {"path": str(evidence), "sha256": "0" * 64}}), encoding="utf-8")
+    summary = tmp_path / "tool_consensus_summary.tsv"
+    summary.write_text("evidence_domain\tconsensus_status\npresentation\tCONSISTENT\n", encoding="utf-8")
+
+    enrich_all_tool_results(evidence, summary)
+
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    assert payload["output"]["sha256"] == hashlib.sha256(evidence.read_bytes()).hexdigest()
+    assert payload["output"]["size_bytes"] == evidence.stat().st_size
+    assert payload["post_ranking_consensus_enriched"] is True
+
+
+def test_manifest_hash_records_ignore_non_hash_sentinels():
+    value = {
+        "large": {"path": "/large.tsv", "sha256": "not_computed"},
+        "valid": {"path": "/valid.tsv", "sha256": "A" * 64},
+    }
+    assert _manifest_hash_records(value) == [("/valid.tsv", "a" * 64)]
+
+
 def test_rna_preprocessing_plans_gene_transcript_tpm_and_alt_vaf(tmp_path: Path):
     fastq1 = tmp_path / "tumor_R1.fastq.gz"
     fastq2 = tmp_path / "tumor_R2.fastq.gz"
@@ -1704,9 +1731,9 @@ def _write_review_fixture(root: Path) -> None:
         "peptide_id\tefficacy_score\tfinal_priority\nP1\t0.8\tB\nP2\t0.7\tC\n", encoding="utf-8"
     )
     (scoring / "ranked_peptides.evidence_consensus.tsv").write_text(
-        "evidence_rank\tpeptide_id\tevent_id\tevent_type\tgene\tpeptide\thla_allele\tevidence_grade\tpareto_front\trna_support_state\tsafety_state\tpresentation_consensus_state\tmutant_specificity_state\tclonality_state\tccf_confidence\thla_appm_state\tevidence_completeness_state\thard_failure\n"
-        "1\tP1\tE1\tSNV\tGENE1\tSYFPEITHI\tHLA-A*02:01\tR1\t1\tRNA_CONFIRMED\tSAFETY_PASS\tPRESENTATION_CONSISTENT_STRONG\tMT_SPECIFIC\tCLONAL_LIKE\thigh\tHLA_APPM_RETAINED\tCOMPLETE\tno\n"
-        "2\tP2\tE2\tfusion\tGENE2::GENE3\tABCDEFGHI\tHLA-B*07:02\tR3\t1\tRNA_UNASSESSED\tSAFETY_PARTIAL\tPRESENTATION_SINGLE_TOOL\tNOVEL_JUNCTION\tunresolved\tlow\tHLA_LOH_UNASSESSED\tPARTIAL\tno\n",
+        "evidence_rank\tpeptide_id\tevent_id\tevent_type\tgene\tpeptide\thla_allele\tevidence_grade\tpareto_front\trna_support_state\trna_support_status\tsafety_state\tpresentation_consensus_state\tmutant_specificity_state\tclonality_state\tccf_confidence\thla_appm_state\tevidence_completeness_state\thard_failure\n"
+        "1\tP1\tE1\tSNV\tGENE1\tSYFPEITHI\tHLA-A*02:01\tR1\t1\tRNA_CONFIRMED\tRNA_ALT_DETECTED\tSAFETY_PASS\tPRESENTATION_CONSISTENT_STRONG\tMT_SPECIFIC\tCLONAL_LIKE\thigh\tHLA_APPM_RETAINED\tCOMPLETE\tno\n"
+        "2\tP2\tE2\tfusion\tGENE2::GENE3\tABCDEFGHI\tHLA-B*07:02\tR3\t1\tRNA_UNASSESSED\tRNA_ALT_NOT_DETECTED\tSAFETY_PARTIAL\tPRESENTATION_SINGLE_TOOL\tNOVEL_JUNCTION\tunresolved\tlow\tHLA_LOH_UNASSESSED\tPARTIAL\tno\n",
         encoding="utf-8",
     )
     (scoring / "all_tool_results.tsv").write_text((scoring / "ranked_peptides.evidence_consensus.tsv").read_text(encoding="utf-8"), encoding="utf-8")
@@ -1734,6 +1761,8 @@ def test_open_neo_review_is_event_level_and_non_mutating(tmp_path: Path):
     review_rows = list(csv.DictReader((outdir / "review/candidate_review.tsv").open(), delimiter="\t"))
     assert [row["gene"] for row in review_rows] == ["GENE1", "GENE2::GENE3"]
     assert (outdir / "review/first_batch_experiment_set.tsv").is_file()
+    assert (outdir / "review/vaccine_event_candidates.tsv").is_file()
+    assert (outdir / "review/vaccine_event_neoepitopes.tsv").is_file()
     first_batch = list(csv.DictReader((outdir / "review/first_batch_experiment_set.tsv").open(), delimiter="\t"))
     assert [row["gene"] for row in first_batch] == ["GENE1", "GENE2::GENE3"]
     assert first_batch[1]["experiment_priority"] == "TARGETED_RNA_FIRST"
@@ -1748,6 +1777,7 @@ def test_open_neo_review_is_event_level_and_non_mutating(tmp_path: Path):
     assert (outdir / "review/integrity/review_integrity.json").is_file()
     assert (outdir / "review/experiment_design/short_peptide_pool.tsv").is_file()
     assert (outdir / "review/experiment_design/targeted_rna_validation_plan.tsv").is_file()
+    assert (outdir / "review/experiment_design/vaccine_construct_plan.tsv").is_file()
     assert (outdir / "review/hla_loh_appm_review/appm_escape_review.md").is_file()
     assert (outdir / "review/ccf_clonality_review/ccf_clonality_review.md").is_file()
     assert (outdir / "reports/technical_report.md").is_file()
@@ -1756,6 +1786,28 @@ def test_open_neo_review_is_event_level_and_non_mutating(tmp_path: Path):
     assert "<pre>" not in technical_html
     assert review_rows[0]["pipeline_r_grade"] == "R1"
     assert review_rows[0]["experiment_priority"] == "EXPERIMENT_PRIORITY_HIGH"
+
+
+def test_vaccine_event_tables_group_all_unique_epitopes_under_mutation():
+    events = [{
+        "event_evidence_rank": "1", "event_group_id": "EVENT:E1", "event_id": "E1",
+        "member_event_ids": "E1", "gene": "TP53", "event_type": "SNV",
+        "best_evidence_grade": "R2", "best_peptide_id": "P1",
+    }]
+    peptides = [
+        {"evidence_rank": "1", "peptide_id": "P1", "event_id": "E1", "peptide": "ABCDEFGHI", "hla_allele": "HLA-A*02:01", "evidence_grade": "R2"},
+        {"evidence_rank": "2", "peptide_id": "P2", "event_id": "E1", "peptide": "BCDEFGHIJ", "hla_allele": "HLA-B*07:02", "evidence_grade": "R3"},
+        {"evidence_rank": "3", "peptide_id": "P3", "event_id": "E1", "peptide": "ABCDEFGHI", "hla_allele": "HLA-A*02:01", "evidence_grade": "R3"},
+    ]
+    reviews = [{"event_group_id": "EVENT:E1", "event_id": "E1", "review_status": "ADVANCE_EXPERIMENT", "experiment_priority": "EXPERIMENT_PRIORITY_HIGH"}]
+    summaries, details = build_vaccine_event_tables(events, peptides, reviews)
+    assert len(summaries) == 1
+    assert summaries[0]["unique_neoepitope_hla_count"] == "2"
+    assert summaries[0]["unique_peptide_count"] == "2"
+    assert summaries[0]["hla_coverage_count"] == "2"
+    assert summaries[0]["vaccine_selection_unit"] == "MUTATION_OR_BIOLOGICAL_EVENT"
+    assert len(details) == 2
+    assert {row["peptide_id"] for row in details} == {"P1", "P2"}
 
 
 def test_open_neo_review_can_skip_document_generation(tmp_path: Path):

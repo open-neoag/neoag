@@ -120,7 +120,21 @@ def lookup_peptide_catalog(
 
 def classify_validation_mode(peptide: Mapping[str, Any]) -> str:
     priority = _norm(peptide.get("final_priority")).upper()
-    if priority == "D":
+    evidence_grade = _norm(
+        peptide.get("evidence_grade")
+        or peptide.get("event_evidence_grade")
+        or peptide.get("best_evidence_grade")
+    ).upper()
+    hard_failure = any(
+        _norm(peptide.get(field)).lower()
+        not in {"", "0", "false", "no", "none", "na", "n/a", "unassessed"}
+        for field in (
+            "hard_failure", "hard_fail", "hard_failure_codes",
+            "source_chain_hard_failure", "source_chain_hard_failure_codes",
+        )
+    ) or _norm(peptide.get("safety_status")).upper() == "FAIL"
+    consensus_nonblocking = evidence_grade.startswith(("R1", "R2", "R3")) and not hard_failure
+    if priority == "D" and not consensus_nonblocking:
         return "do_not_advance"
     if _norm(peptide.get("haplotype_status")).upper() == "PHASING_REQUIRED":
         return "phasing_required"
@@ -229,6 +243,14 @@ def design_validation_row(
 
     if catalog_row:
         notes.append("minigene_from_peptide_catalog")
+
+    rna_state = _norm(peptide.get("rna_support_state") or peptide.get("rna_support_status")).upper()
+    rna_depth = _norm(peptide.get("rna_depth"))
+    if _norm(peptide.get("event_type")).upper() in {"SNV", "INDEL"} and (
+        rna_state in {"RNA_UNASSESSED", "GENE_EXPRESSION_ONLY", "UNASSESSED", "NOT_ASSESSED"}
+        or (rna_state not in {"RNA_CONFIRMED", "RNA_ALT_DETECTED"} and rna_depth in {"", "0", "0.0"})
+    ):
+        notes.append("RNA locus evidence unassessed; obtain RNA depth, ALT reads, and RNA VAF")
 
     return {
         "peptide_id": _norm(peptide.get("peptide_id")),

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from neoag.reports_dual import ReportBundle, _apply_patient_gene_expression, _augment_runtime_tool_provenance, _find_bam_input, _patient_analysis_context, _patient_conflict_summary, _patient_disease_background, _patient_dna_evidence, _patient_dna_rna_interpretation, _patient_event_grade_counts, _patient_event_representatives, _patient_evidence_audit_rows, _patient_evidence_summary, _patient_event_change, _patient_expression_tpm_map, _patient_fusion_artifact_review, _patient_fusion_boundary_evidence, _patient_hla_loh_consensus, _patient_key_gaps, _patient_limitation, _patient_manual_review_rows, _patient_metric, _patient_presentation_metric, _patient_presentation_quantitative_row, _patient_rna_measurements, _patient_rna_metric, _patient_safety_dimensions, _patient_safety_gap, _patient_tool_rows, _patient_track, _patient_validation, _replace_gene_ids, load_report_bundle, make_dual_reports, make_patient_report, make_technical_report
 from neoag.reports_dual import _patient_ccf_coverage_rows, _patient_clonality_boundary, _patient_coding_variant_rna_rows, _patient_experiment_entry_gate_rows, _patient_fusion_narrative_rows, _patient_fusion_narrative_tier, _patient_splice_funnel_rows
+from neoag.reports_dual import _patient_event_group_cache
 from neoag.utils import write_tsv
 
 
@@ -53,11 +54,15 @@ def test_patient_report_is_plain_language(tmp_path):
     assert "重点变异事件（按类型、按事件去重）" in text
     assert "关键人工审阅事件" in text
     assert "进入本表不等于自动升级为R1/R2" in text
-    assert "关键证据与下一步" in text
-    section6 = text.split("6. 人工复核候选的综合证据与实验建议（1个）", 1)[1].split("7. 分析方法与工具状态", 1)[0]
-    assert "<th>候选</th>" in section6
-    assert "<th>为什么值得关注</th>" in section6
-    assert "<th>当前不确定性</th>" in section6
+    assert "事件级证据与下一步" in text
+    assert "肽级证据与缺口" in text
+    section6 = text.split("6. mRNA疫苗组合候选事件与实验建议（跨赛道平衡选择后1个）", 1)[1].split("7. 分析方法与工具状态", 1)[0]
+    assert "<th>突变/事件</th>" in section6
+    assert "<th>组合概览</th>" in section6
+    assert "<th>代表肽-HLA</th>" in section6
+    assert "<th>证据等级与关键定量值</th>" in section6
+    assert "<th>事件级判断</th>" in section6
+    assert "<th>肽级证据缺口</th>" in section6
     assert "<th>建议下一步</th>" in section6
     assert "Safety-focused validation before efficacy assay" not in section6
     assert "<th>呈递工具</th>" not in section6
@@ -66,10 +71,11 @@ def test_patient_report_is_plain_language(tmp_path):
     assert "RNA位点深度 20" in text
     assert "RNA alt reads 4" in text
     assert "RNA VAF 0.2000" in text
-    assert "5. 当前进入人工复核的候选Peptide–HLA组合（去重后1个）" in text
-    assert "当前展示1个去重候选组合" in text
-    candidate_section = text.split("5. 当前进入人工复核的候选Peptide–HLA组合（去重后1个）", 1)[1].split("6. 人工复核候选的综合证据与实验建议（1个）", 1)[0]
-    assert "<th>关键证据与下一步</th>" in candidate_section
+    assert "5. 当前进入人工复核的疫苗候选事件（按突变/生物学事件去重后1个）" in text
+    assert "当前展示1个去重候选事件" in text
+    candidate_section = text.split("5. 当前进入人工复核的疫苗候选事件（按突变/生物学事件去重后1个）", 1)[1].split("6. mRNA疫苗组合候选事件与实验建议（跨赛道平衡选择后1个）", 1)[0]
+    assert "<th>事件级证据与下一步</th>" in candidate_section
+    assert "<th>肽级证据与缺口</th>" in candidate_section
     assert "<th>关键证据</th>" not in candidate_section
     assert "<th>主要限制</th>" not in candidate_section
     assert "<th>建议实验</th>" not in candidate_section
@@ -181,16 +187,46 @@ def test_patient_top_candidates_include_non_r4_technical_review_rows(tmp_path):
     out = tmp_path / "patient_top100.html"
     make_patient_report(out, bundle, event_top_n=20, candidate_top_n=100)
     text = out.read_text(encoding="utf-8")
-    section = text.split("<h3>当前展示100个去重候选组合</h3>", 1)[1].split("</table>", 1)[0]
+    section = text.split("<h3>当前展示100个去重候选事件</h3>", 1)[1].split("</table>", 1)[0]
     assert section.count("<tr>") - 1 == 100
-    assert section.count("<td>R3-REVIEW</td>") == 100
+    assert section.count("事件 R3-REVIEW；肽") == 100
     assert "G99" in section
     assert "G100" not in section
 
-    interpretation = text.split("6. 人工复核候选的综合证据与实验建议（20个）", 1)[1].split("7. 分析方法与工具状态", 1)[0]
+    interpretation = text.split("6. mRNA疫苗组合候选事件与实验建议（跨赛道平衡选择后20个）", 1)[1].split("7. 分析方法与工具状态", 1)[0]
     assert interpretation.count("<tr>") - 1 == 20
-    assert "G19 |" in interpretation
-    assert "G20 |" not in interpretation
+    assert ">G19</td>" in interpretation
+    assert "<td>G20</td>" not in interpretation
+
+def test_patient_vaccine_portfolio_balances_eligible_tracks_without_cross_track_rank(tmp_path):
+    bundle = _bundle()
+    bundle.events = []
+    bundle.peptides = []
+    for track, prefix in (("InDel", "I"), ("SNV", "S")):
+        for index in range(12):
+            event_id = f"{prefix}{index}"
+            bundle.events.append({
+                "event_id": event_id, "gene": event_id, "event_type": track,
+                "best_evidence_grade": "R3",
+            })
+            bundle.peptides.append({
+                "peptide_id": f"P{event_id}", "event_id": event_id,
+                "gene": event_id, "event_type": track, "peptide": "ABCDEFGHI",
+                "hla_allele": "HLA-A*02:01", "evidence_grade": "R3",
+            })
+    bundle.validation_rows = []
+    out = tmp_path / "patient_balanced_portfolio.html"
+    make_patient_report(out, bundle, candidate_top_n=24)
+    text = out.read_text(encoding="utf-8")
+    section = text.split(
+        "6. mRNA疫苗组合候选事件与实验建议（跨赛道平衡选择后20个）", 1,
+    )[1].split("7. 分析方法与工具状态", 1)[0]
+    assert section.count("InDel #") == 10
+    assert section.count("SNV #") == 10
+    assert "<th>排名</th>" not in section
+    assert "<th>赛道内排名</th>" in section
+    assert "不同赛道不计算统一总分" in section
+
 
 
 def test_splice_dna_evidence_does_not_render_placeholder_vcf_zero():
@@ -279,6 +315,73 @@ def test_patient_validation_translates_safety_recommendation():
     }
     text = _patient_validation(row, {})
     assert text == "先完成正常组织数据库复核及实验性脱靶/交叉反应验证，再考虑有效性实验"
+    assert "Safety-focused" not in text
+
+
+def test_patient_validation_does_not_apply_stale_weighted_block_to_consensus_r3():
+    row = {
+        "peptide_id": "P_R3",
+        "event_type": "InDel",
+        "evidence_grade": "R3",
+        "rna_support_state": "RNA_UNASSESSED",
+        "rna_depth": "0",
+        "hard_failure_codes": "",
+    }
+    val_map = {
+        "P_R3": {
+            "validation_mode": "do_not_advance",
+            "validation_strategy": "Do not advance",
+            "priority": "D",
+        },
+    }
+    text = _patient_validation(row, val_map)
+    assert "暂缓/不推进" not in text
+    assert "补做RNA位点覆盖与ALT reads/VAF评估" in text
+    assert "新生尾部长肽或minigene" in text
+
+
+def test_patient_validation_keeps_do_not_advance_for_real_hard_failure():
+    row = {
+        "peptide_id": "P_FAIL",
+        "event_type": "InDel",
+        "evidence_grade": "R3",
+        "hard_failure_codes": "HARD_REFERENCE_PROTEOME_MATCH",
+    }
+    val_map = {"P_FAIL": {"validation_strategy": "Do not advance"}}
+    assert "暂缓/不推进" in _patient_validation(row, val_map)
+
+
+def test_patient_validation_uses_event_level_consensus_grade_contract():
+    row = {
+        "peptide_id": "P_EVENT_R3",
+        "event_type": "InDel",
+        "best_evidence_grade": "R3-GAP",
+        "rna_support_state": "RNA_UNASSESSED",
+        "hard_failure_codes": "",
+    }
+    val_map = {"P_EVENT_R3": {"validation_strategy": "Do not advance"}}
+    text = _patient_validation(row, val_map)
+    assert "暂缓/不推进" not in text
+    assert "补做RNA位点覆盖与ALT reads/VAF评估" in text
+
+
+def test_patient_consensus_grade_ignores_nonblocking_legacy_validation_wording():
+    row = {
+        "peptide_id": "P_R3_SAFETY",
+        "event_type": "InDel",
+        "evidence_grade": "R3",
+        "safety_status": "SAFETY_PARTIAL",
+        "rna_support_state": "RNA_CONFIRMED",
+    }
+    val_map = {
+        "P_R3_SAFETY": {
+            "validation_strategy": "Safety-focused validation before efficacy assay",
+            "priority": "C_CAUTION",
+        },
+    }
+    text = _patient_validation(row, val_map)
+    assert "正常组织数据库复核" in text
+    assert "新生尾部长肽或minigene" in text
     assert "Safety-focused" not in text
 
 
@@ -393,7 +496,7 @@ def test_patient_home_conclusion_is_direct_and_derived_from_current_results(tmp_
     assert "本次重点审阅：" not in text
 
 
-def test_patient_candidate_section_counts_final_peptide_hla_deduplication(tmp_path):
+def test_patient_candidate_section_keeps_distinct_events_with_same_peptide_hla(tmp_path):
     bundle = _bundle()
     bundle.events = [
         {"event_id": "E1", "gene": "GENEA", "event_type": "SNV", "best_evidence_grade": "R3", "evidence_missing_layers": "rna"},
@@ -407,12 +510,103 @@ def test_patient_candidate_section_counts_final_peptide_hla_deduplication(tmp_pa
     out = tmp_path / "patient_deduplicated_count.html"
     make_patient_report(out, bundle, candidate_top_n=100)
     text = out.read_text(encoding="utf-8")
-    assert "候选Peptide–HLA组合（去重后1个）" in text
-    assert "人工复核候选的综合证据与实验建议（1个）" in text
+    assert "疫苗候选事件（按突变/生物学事件去重后2个）" in text
+    assert "mRNA疫苗组合候选事件与实验建议（跨赛道平衡选择后2个）" in text
     assert "Top 100" not in text
     assert "前20项" not in text
-    section = text.split("<h3>当前展示1个去重候选组合</h3>", 1)[1].split("</table>", 1)[0]
-    assert section.count("<tr>") - 1 == 1
+    section = text.split("<h3>当前展示2个去重候选事件</h3>", 1)[1].split("</table>", 1)[0]
+    assert section.count("<tr>") - 1 == 2
+
+
+def test_patient_interpretation_groups_all_neoepitopes_under_one_event(tmp_path):
+    bundle = _bundle()
+    bundle.events = [{
+        "event_id": "TP53|chr17:7579472G>A", "gene": "TP53", "event_type": "SNV",
+        "best_evidence_grade": "R3", "evidence_missing_layers": "rna",
+    }]
+    common = {
+        "event_id": "TP53|chr17:7579472G>A", "gene": "TP53", "event_type": "SNV",
+        "evidence_grade": "R3", "netmhcpan_el_rank": "0.5",
+    }
+    bundle.peptides = [
+        {**common, "peptide_id": "P1", "peptide": "ABCDEFGHI", "hla_allele": "HLA-A*02:01"},
+        {**common, "peptide_id": "P2", "peptide": "BCDEFGHIJ", "hla_allele": "HLA-B*07:02"},
+    ]
+    out = tmp_path / "patient_event_grouped.html"
+    make_patient_report(out, bundle, candidate_top_n=20)
+    text = out.read_text(encoding="utf-8")
+    section = text.split(
+        "6. mRNA疫苗组合候选事件与实验建议（跨赛道平衡选择后1个）", 1
+    )[1].split("7. 分析方法与工具状态", 1)[0]
+    assert section.count("<tr>") - 1 == 2
+    assert "1个epitope family、2个组合" in section
+    assert "rowspan=&#x27;2&#x27;" not in section
+    assert "rowspan='2'" in section
+    assert "1.1" not in section and "1.2" not in section
+    assert "ABCDEFGHI / HLA-A*02:01" in section
+    assert "BCDEFGHIJ / HLA-B*07:02" in section
+    assert "同一事件，沿用首行综合证据" not in section
+    assert "本表沿用第5节完全相同的事件去重、epitope family和代表肽选择结果" in section
+    assert "证据等级与关键定量值" in section
+    assert "事件级判断" in section
+    assert "肽级证据缺口" in section
+    assert "综合证据/为什么值得关注" not in section
+    assert "当前不确定性" not in section
+    assert "证据等级 R3" in section
+    assert "不同赛道不计算统一总分" in section
+
+
+def test_patient_event_representatives_do_not_use_r4_peptides_as_padding():
+    event = {"event_id": "E1", "gene": "GENE1", "event_type": "InDel"}
+    peptides = [
+        {
+            "event_id": "E1", "peptide_id": "P_R3", "peptide": "ABCDEFGHI",
+            "hla_allele": "HLA-A*02:01", "evidence_grade": "R3",
+        },
+        {
+            "event_id": "E1", "peptide_id": "P_R4", "peptide": "BCDEFGHIK",
+            "hla_allele": "HLA-B*07:02", "evidence_grade": "R4",
+        },
+    ]
+    cache = _patient_event_group_cache([event], peptides)
+    representatives = cache[id(event)]["representative_rows"]
+    assert [row["peptide_id"] for row in representatives] == ["P_R3"]
+    assert cache[id(event)]["epitope_count"] == 2
+
+
+def test_patient_interpretation_does_not_merge_hidden_r4_advice(tmp_path):
+    bundle = _bundle()
+    bundle.events = [{
+        "event_id": "E1", "gene": "GENE1", "event_type": "InDel",
+        "best_evidence_grade": "R3", "evidence_missing_layers": "rna",
+    }]
+    common = {
+        "event_id": "E1", "gene": "GENE1", "event_type": "InDel",
+        "peptide_consequence": "frameshift", "rna_support_state": "RNA_UNASSESSED",
+    }
+    bundle.peptides = [
+        {
+            **common, "peptide_id": "P_R3", "peptide": "ABCDEFGHI",
+            "hla_allele": "HLA-A*02:01", "evidence_grade": "R3",
+        },
+        {
+            **common, "peptide_id": "P_R4", "peptide": "BCDEFGHIK",
+            "hla_allele": "HLA-B*07:02", "evidence_grade": "R4",
+        },
+    ]
+    bundle.validation_rows = [{
+        "peptide_id": "P_R4", "validation_strategy": "Do not advance",
+    }]
+    out = tmp_path / "patient_no_hidden_r4_advice.html"
+    make_patient_report(out, bundle, candidate_top_n=20)
+    text = out.read_text(encoding="utf-8")
+    section = text.split("6. mRNA疫苗组合候选事件与实验建议", 1)[1].split(
+        "7. 分析方法与工具状态", 1,
+    )[0]
+    assert "ABCDEFGHI / HLA-A*02:01" in section
+    assert "BCDEFGHIK / HLA-B*07:02" not in section
+    assert "暂缓/不推进" not in section
+    assert "补做RNA位点覆盖与ALT reads/VAF评估" in section
 
 
 def test_patient_event_top_table_uses_event_level_r3_subgrade(tmp_path):
@@ -467,7 +661,7 @@ def test_patient_report_top_limits_are_configurable(tmp_path):
     make_patient_report(out, _bundle(), event_top_n=1, candidate_top_n=3)
     text = out.read_text(encoding="utf-8")
     assert "SNV Top 1" in text
-    assert "5. 当前进入人工复核的候选Peptide–HLA组合（去重后1个）" in text
+    assert "5. 当前进入人工复核的疫苗候选事件（按突变/生物学事件去重后1个）" in text
 
 
 def test_patient_report_has_track_top5_when_present(tmp_path):
@@ -2221,7 +2415,7 @@ def test_disease_knowledge_prioritizes_display_without_changing_r_grade(tmp_path
     out = tmp_path / "patient_anchor.html"
     make_patient_report(out, bundle, event_top_n=2, candidate_top_n=2)
     text = out.read_text(encoding="utf-8")
-    section = text.split("当前展示2个去重候选组合", 1)[1].split("</table>", 1)[0]
+    section = text.split("当前展示2个去重候选事件", 1)[1].split("</table>", 1)[0]
     assert section.index("EWSR1::WT1") < section.index("PPP1R9B::PPP1R9B")
     assert "仅优先展示，不自动提升R等级" in text
     assert "核心分子发现：EWSR1::WT1" in text
@@ -2229,7 +2423,7 @@ def test_disease_knowledge_prioritizes_display_without_changing_r_grade(tmp_path
     assert "本报告本身不替代病理诊断" in text
     assert "结构化临床诊断" in text
     assert "分子知识库锚定" in text
-    assert "<td>R3-" in section
+    assert "事件 R3-" in section
     assert "<td>R1</td>" not in section
     assert "<td>R2</td>" not in section
 
@@ -2245,3 +2439,79 @@ def test_disease_knowledge_is_auto_discovered_from_structured_disease():
     assert bundle.disease_knowledge["status"] == "LOADED"
     assert bundle.disease_knowledge["disease_id"] == "DSRCT"
     assert bundle.disease_knowledge["anchors"][0]["event"] == "EWSR1::WT1"
+
+
+def test_resumed_result_recovers_case_metadata_purity_and_hla_loh(tmp_path):
+    case_root = tmp_path / "CASE01"
+    result_root = case_root / "scoring" / "rerank"
+    result_root.mkdir(parents=True)
+    purity_root = case_root / "purity_cnv"
+    purity_root.mkdir()
+    (purity_root / "facets_purity.tsv").write_text(
+        "sample_id\tpurity\tevidence_status\nCASE01\t0.28\treal\n", encoding="utf-8",
+    )
+    (purity_root / "purple_purity.tsv").write_text(
+        "purity\tploidy\tstatus\n0.13\t2.12\tNORMAL\n", encoding="utf-8",
+    )
+    (purity_root / "sequenza_purity.tsv").write_text(
+        "sample_id\tpurity\tploidy\tconfidence\nCASE01\t0.12\t2.2\tlow\n", encoding="utf-8",
+    )
+    hla_root = case_root / "hla_loh_consensus"
+    hla_root.mkdir()
+    (hla_root / "spechla_hla_loh.tsv").write_text(
+        "hla_allele\tloh_status\tevidence_tool\nHLA-A*02:01\tno\tspechla\n", encoding="utf-8",
+    )
+    appm_root = case_root / "appm"
+    appm_root.mkdir()
+    (appm_root / "appm_summary.tsv").write_text(
+        "sample_id\tmhc_i_integrity_score\tmhc_ii_integrity_score\tifng_response_score\tmhc_i_integrity_status\tmhc_ii_integrity_status\tifng_response_status\tappm_evidence_completeness\tappm_evidence_completeness_score\tfunctional_validation_status\tvalidation_evidence_source\n"
+        "CASE01\t1.0\t1.0\t0.65\tMHC_I_INTACT\tMHC_II_INTACT\tIFNG_RESPONSE_CAUTION\tPARTIAL\t0.4286\tcomputational_proxy\tDNA_CNV_RNA_HLA_LOH_only\n",
+        encoding="utf-8",
+    )
+    (appm_root / "appm_evidence_completeness.tsv").write_text(
+        "sample_id\tappm_evidence_completeness_score\tappm_evidence_completeness_status\tmissing_evidence\n"
+        "CASE01\t0.4286\tPARTIAL\tmutation;protein;flow;ligandome\n",
+        encoding="utf-8",
+    )
+    evidence = result_root / "all_tool_results.tsv"
+    evidence.write_text(
+        "peptide_id\tevent_id\tpeptide\thla_allele\tevidence_grade\nP1\tE1\tAAAAAAAAA\tHLA-A*02:01\tR3\n",
+        encoding="utf-8",
+    )
+    evidence_sha = hashlib.sha256(evidence.read_bytes()).hexdigest()
+    (result_root / "all_tool_results.manifest.json").write_text(json.dumps({
+        "output": {"path": str(evidence), "sha256": evidence_sha},
+    }), encoding="utf-8")
+    (result_root / "run_manifest.json").write_text(json.dumps({
+        "run_id": "run-CASE01", "sample_id": "CASE01", "mode": "ranking-only",
+        "genome_build": "GRCh38",
+    }), encoding="utf-8")
+    (result_root / "evidence_consensus_run.json").write_text(json.dumps({
+        "rules_name": "sarcoma_evidence_consensus_v3_source_chain",
+        "rules_version": "3.0-alpha1", "input": {"sha256": evidence_sha},
+    }), encoding="utf-8")
+
+    base = _bundle()
+    bundle = load_report_bundle(
+        profile={"_profile_name": "default"},
+        events=base.events,
+        peptides=base.peptides,
+        outdir=result_root,
+    )
+    assert {row["tool"] for row in bundle.purity_tools} == {"FACETS", "PURPLE", "Sequenza"}
+    assert bundle.purity_consensus["status"] == "MULTI_TOOL_DISCORDANT_REVIEW"
+    assert any(row.get("_report_tool") == "SpecHLA" for row in bundle.hla_loh_tool_results)
+    out = tmp_path / "recovered_patient.html"
+    make_patient_report(out, bundle)
+    text = out.read_text(encoding="utf-8")
+    assert "sarcoma_evidence_consensus_v3_source_chain" in text
+    assert "3.0-alpha1" in text
+    assert evidence_sha in text
+    assert "仅SpecHLA报告未提示LOH，证据有限" in text
+    assert "现有结果未发现HLA-I呈递系统整体完全丧失" in text
+    assert "IFNG/JAK-STAT应答存在谨慎信号" in text
+    assert "证据部分完整" in text
+    assert "计算评分 0.6500" in text
+    assert "计算评分 0.4286" in text
+    assert "mutation、protein、flow、ligandome" in text
+    assert "computational_proxy" in text
