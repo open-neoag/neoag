@@ -150,7 +150,8 @@ class SpliceMutrNormalP0Tests(unittest.TestCase):
             write(
                 formed / "x_data_splicemutr_cp_corrected.txt",
                 "chr\tstart\tend\tstrand\tpeptide\tpep_junc_loc\tmodified\ttx_id\tgene\tcluster\n"
-                "chr1\t100\t200\t+\tABCDEFGH\t4\tTUMOR\tENST1\tGENE1\tC1\n",
+                "chr1\t100\t200\t+\tABCDEFGH\t4\tTUMOR\tENST1\tGENE1\tC1\n"
+                "chr20\t33678200\t33678201\t-\tABCDEFGH\t4\tTUMOR\tENST2\tGENE2\tC2\n",
             )
             out = tmp / "out"
             env = dict(os.environ)
@@ -165,12 +166,14 @@ class SpliceMutrNormalP0Tests(unittest.TestCase):
             )
             origin = read_tsv(out / "splice_peptide_origins.tsv")[0]
             peptide = read_tsv(out / "raw_peptides.formal_origins.tsv")[0]
+            summary = json.loads((out / "rebuild_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(origin["structural_novelty_status"], "ALTERED_JUNCTION_SPANNING_SEQUENCE")
             self.assertEqual(origin["tumor_specificity_status"], "UNASSESSED_NO_COMPATIBLE_NORMAL_RNA_COHORT")
             self.assertEqual(peptide["mutant_specificity_status"], "UNASSESSED")
             self.assertEqual(peptide["mutant_specificity_gate_status"], "REVIEW_REQUIRED")
             self.assertEqual(peptide["mutant_specificity_priority_cap"], "R3")
             self.assertNotEqual(peptide["mutant_specificity_status"], "MT_SPECIFIC")
+            self.assertEqual(summary["skipped_non_intronic_rows"], 1)
 
     def test_recount3_builder_records_release_and_denominator(self) -> None:
         with tempfile.TemporaryDirectory() as td:

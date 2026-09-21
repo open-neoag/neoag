@@ -55,12 +55,14 @@ def test_patient_report_is_plain_language(tmp_path):
     assert "关键人工审阅事件" in text
     assert "进入本表不等于自动升级为R1/R2" in text
     assert "事件级证据与下一步" in text
-    assert "肽级证据与缺口" in text
+    assert "肽级证据缺口" in text
     section6 = text.split("6. mRNA疫苗组合候选事件与实验建议（跨赛道平衡选择后1个）", 1)[1].split("7. 分析方法与工具状态", 1)[0]
     assert "<th>突变/事件</th>" in section6
     assert "<th>组合概览</th>" in section6
-    assert "<th>代表肽-HLA</th>" in section6
-    assert "<th>证据等级与关键定量值</th>" in section6
+    assert "<th>候选肽1</th>" in section6
+    assert "<th>候选肽2</th>" in section6
+    assert "<th>候选肽3</th>" in section6
+    assert "<th>事件等级</th>" in section6
     assert "<th>事件级判断</th>" in section6
     assert "<th>肽级证据缺口</th>" in section6
     assert "<th>建议下一步</th>" in section6
@@ -71,11 +73,13 @@ def test_patient_report_is_plain_language(tmp_path):
     assert "RNA位点深度 20" in text
     assert "RNA alt reads 4" in text
     assert "RNA VAF 0.2000" in text
-    assert "5. 当前进入人工复核的疫苗候选事件（按突变/生物学事件去重后1个）" in text
-    assert "当前展示1个去重候选事件" in text
-    candidate_section = text.split("5. 当前进入人工复核的疫苗候选事件（按突变/生物学事件去重后1个）", 1)[1].split("6. mRNA疫苗组合候选事件与实验建议（跨赛道平衡选择后1个）", 1)[0]
+    assert "5. 当前进入人工复核的疫苗候选事件（1个；每个事件最多3条候选肽）" in text
+    assert "当前展示1个去重候选事件、1个代表Peptide-HLA组合" in text
+    candidate_section = text.split("5. 当前进入人工复核的疫苗候选事件（1个；每个事件最多3条候选肽）", 1)[1].split("6. mRNA疫苗组合候选事件与实验建议（跨赛道平衡选择后1个）", 1)[0]
     assert "<th>事件级证据与下一步</th>" in candidate_section
-    assert "<th>肽级证据与缺口</th>" in candidate_section
+    assert "<th>候选肽1</th>" in candidate_section
+    assert "<th>候选肽2</th>" in candidate_section
+    assert "<th>候选肽3</th>" in candidate_section
     assert "<th>关键证据</th>" not in candidate_section
     assert "<th>主要限制</th>" not in candidate_section
     assert "<th>建议实验</th>" not in candidate_section
@@ -187,9 +191,9 @@ def test_patient_top_candidates_include_non_r4_technical_review_rows(tmp_path):
     out = tmp_path / "patient_top100.html"
     make_patient_report(out, bundle, event_top_n=20, candidate_top_n=100)
     text = out.read_text(encoding="utf-8")
-    section = text.split("<h3>当前展示100个去重候选事件</h3>", 1)[1].split("</table>", 1)[0]
+    section = text.split("<h3>当前展示100个去重候选事件、100个代表Peptide-HLA组合</h3>", 1)[1].split("</table>", 1)[0]
     assert section.count("<tr>") - 1 == 100
-    assert section.count("事件 R3-REVIEW；肽") == 100
+    assert section.count("<td>R3-REVIEW</td>") == 100
     assert "G99" in section
     assert "G100" not in section
 
@@ -510,11 +514,11 @@ def test_patient_candidate_section_keeps_distinct_events_with_same_peptide_hla(t
     out = tmp_path / "patient_deduplicated_count.html"
     make_patient_report(out, bundle, candidate_top_n=100)
     text = out.read_text(encoding="utf-8")
-    assert "疫苗候选事件（按突变/生物学事件去重后2个）" in text
+    assert "疫苗候选事件（2个；每个事件最多3条候选肽）" in text
     assert "mRNA疫苗组合候选事件与实验建议（跨赛道平衡选择后2个）" in text
     assert "Top 100" not in text
     assert "前20项" not in text
-    section = text.split("<h3>当前展示2个去重候选事件</h3>", 1)[1].split("</table>", 1)[0]
+    section = text.split("<h3>当前展示2个去重候选事件、2个代表Peptide-HLA组合</h3>", 1)[1].split("</table>", 1)[0]
     assert section.count("<tr>") - 1 == 2
 
 
@@ -538,16 +542,46 @@ def test_patient_interpretation_groups_all_neoepitopes_under_one_event(tmp_path)
     section = text.split(
         "6. mRNA疫苗组合候选事件与实验建议（跨赛道平衡选择后1个）", 1
     )[1].split("7. 分析方法与工具状态", 1)[0]
-    assert section.count("<tr>") - 1 == 2
+    assert section.count("<tr>") - 1 == 1
     assert "1个epitope family、2个组合" in section
     assert "rowspan=&#x27;2&#x27;" not in section
-    assert "rowspan='2'" in section
+    assert "rowspan='2'" not in section
     assert "1.1" not in section and "1.2" not in section
     assert "ABCDEFGHI / HLA-A*02:01" in section
     assert "BCDEFGHIJ / HLA-B*07:02" in section
     assert "同一事件，沿用首行综合证据" not in section
     assert "本表沿用第5节完全相同的事件去重、epitope family和代表肽选择结果" in section
-    assert "证据等级与关键定量值" in section
+    assert "候选肽1" in section and "候选肽2" in section and "候选肽3" in section
+
+
+def test_patient_sections_five_and_six_cap_each_event_at_three_candidate_peptides(tmp_path):
+    bundle = _bundle()
+    bundle.events[0]["best_evidence_grade"] = "R3"
+    bundle.peptides = [
+        {
+            **bundle.peptides[0],
+            "peptide_id": f"P{i}",
+            "peptide": f"AAAAAAA{i}",
+            "hla_allele": "HLA-A*02:01",
+            "evidence_grade": "R3",
+        }
+        for i in range(1, 5)
+    ]
+    out = tmp_path / "patient_event_three_peptide_cap.html"
+    make_patient_report(out, bundle, candidate_top_n=10)
+    text = out.read_text(encoding="utf-8")
+    section5 = text.split("5. 当前进入人工复核的疫苗候选事件", 1)[1].split(
+        "6. mRNA疫苗组合候选事件与实验建议", 1,
+    )[0]
+    section6 = text.split("6. mRNA疫苗组合候选事件与实验建议", 1)[1].split(
+        "7. 分析方法与工具状态", 1,
+    )[0]
+    for section in (section5, section6):
+        assert "<th>候选肽1</th>" in section
+        assert "<th>候选肽2</th>" in section
+        assert "<th>候选肽3</th>" in section
+        assert "候选肽4" not in section
+        assert "AAAAAAA4" not in section
     assert "事件级判断" in section
     assert "肽级证据缺口" in section
     assert "综合证据/为什么值得关注" not in section
@@ -661,7 +695,7 @@ def test_patient_report_top_limits_are_configurable(tmp_path):
     make_patient_report(out, _bundle(), event_top_n=1, candidate_top_n=3)
     text = out.read_text(encoding="utf-8")
     assert "SNV Top 1" in text
-    assert "5. 当前进入人工复核的疫苗候选事件（按突变/生物学事件去重后1个）" in text
+    assert "5. 当前进入人工复核的疫苗候选事件（1个；每个事件最多3条候选肽）" in text
 
 
 def test_patient_report_has_track_top5_when_present(tmp_path):
@@ -2415,7 +2449,7 @@ def test_disease_knowledge_prioritizes_display_without_changing_r_grade(tmp_path
     out = tmp_path / "patient_anchor.html"
     make_patient_report(out, bundle, event_top_n=2, candidate_top_n=2)
     text = out.read_text(encoding="utf-8")
-    section = text.split("当前展示2个去重候选事件", 1)[1].split("</table>", 1)[0]
+    section = text.split("当前展示2个去重候选事件、2个代表Peptide-HLA组合", 1)[1].split("</table>", 1)[0]
     assert section.index("EWSR1::WT1") < section.index("PPP1R9B::PPP1R9B")
     assert "仅优先展示，不自动提升R等级" in text
     assert "核心分子发现：EWSR1::WT1" in text
@@ -2423,7 +2457,7 @@ def test_disease_knowledge_prioritizes_display_without_changing_r_grade(tmp_path
     assert "本报告本身不替代病理诊断" in text
     assert "结构化临床诊断" in text
     assert "分子知识库锚定" in text
-    assert "事件 R3-" in section
+    assert "<td>R3-" in section
     assert "<td>R1</td>" not in section
     assert "<td>R2</td>" not in section
 

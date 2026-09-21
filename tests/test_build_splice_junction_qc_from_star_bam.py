@@ -2,6 +2,7 @@ from pathlib import Path
 
 from scripts.build_splice_junction_qc_from_star_bam import (
     event_junction,
+    load_bam_metrics,
     load_crossvalidated_keys,
 )
 
@@ -12,6 +13,14 @@ def test_event_junction_prefers_canonical_identifier():
         "event_name": "chr10:101035672",
     }
     assert event_junction(row) == ("10", 101035672, 101036006, "+")
+
+
+def test_empty_junction_set_does_not_invoke_samtools(tmp_path: Path):
+    result = load_bam_metrics(
+        "missing-samtools", tmp_path / "missing.bam", set(), tmp_path / "work"
+    )
+    assert result == {}
+    assert (tmp_path / "work" / "candidate_junction_windows.bed").read_text() == ""
 
 
 def test_caller_consensus_requires_crossvalidated_snaf_and_splicemutr(tmp_path: Path):

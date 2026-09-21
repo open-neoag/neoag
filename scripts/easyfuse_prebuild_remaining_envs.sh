@@ -25,26 +25,37 @@ prebuild_conda_env() {
   local yml="$2"
   local check_bin="$3"
   local prefix="${CONDA_CACHE}/env-${env_id}"
+  local donor=""
 
   if [[ -x "${prefix}/bin/${check_bin}" ]]; then
     echo "    ${yml}: already ready (${prefix})"
+    bash "${ROOT}/scripts/fix_easyfuse_pyeasyfuse_env.sh" >/dev/null 2>&1 || true
     return 0
   fi
 
-  wait_for_mamba_free
-  echo "==> Pre-building EasyFuse ${yml} ..."
-  rm -rf "${prefix}"
-  mamba env create -y \
-    --prefix "${prefix}" \
-    --file "${NEOAG_EASYFUSE_HOME}/environments/${yml}"
-  if [[ ! -x "${prefix}/bin/${check_bin}" ]]; then
-    echo "ERROR: ${yml} built but ${check_bin} missing under ${prefix}/bin" >&2
-    ls -la "${prefix}/bin" >&2 || true
-    exit 1
-  fi
-  bash "${ROOT}/scripts/fix_easyfuse_pyeasyfuse_env.sh" >/dev/null 2>&1 || true
-  echo "    ${yml}: done ($(du -sh "${prefix}" | awk '{print $1}'))"
+  # Offline reuse: any existing env-* that already has the required binary.
+  for donor in "${CONDA_CACHE}"/env-*; do
+    [[ -d "${donor}" ]] || continue
+    [[ "${donor}" == "${prefix}" ]] && continue
+    if [[ -x "${donor}/bin/${check_bin}" ]]; then
+      echo "==> Reusing EasyFuse ${yml}: ${prefix} <= ${donor} (no mamba download)"
+      rm -rf "${prefix}"
+      ln -sfn "${donor}" "${prefix}"
+      if [[ -x "${prefix}/bin/${check_bin}" ]]; then
+        bash "${ROOT}/scripts/fix_easyfuse_pyeasyfuse_env.sh" >/dev/null 2>&1 || true
+        return 0
+      fi
+      echo "WARN: symlink reuse failed for ${prefix}; falling through" >&2
+      break
+    fi
+  done
+
+  echo "ERROR: EasyFuse ${yml} needs ${check_bin} at ${prefix}, and no local donor env was found." >&2
+  echo "       Refusing mamba env create (intranet cannot reach conda.anaconda.org)." >&2
+  echo "       Populate ${CONDA_CACHE} from shared_refs/easyfuse_nextflow_conda or a known-good host cache." >&2
+  return 1
 }
+
 
 exec >> "${LOG}" 2>&1
 echo ""

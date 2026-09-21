@@ -27,13 +27,24 @@ seed_env_from_prefix() {
   done
 
   if [[ -z "${src}" ]]; then
+    for candidate in "${CONDA_CACHE}"/env-*; do
+      [[ -d "${candidate}" ]] || continue
+      [[ "${candidate}" == "${target}" ]] && continue
+      if [[ -x "${candidate}/bin/${check_bin}" ]]; then
+        src="${candidate}"
+        break
+      fi
+    done
+  fi
+
+  if [[ -z "${src}" ]]; then
     echo "WARN: no source env for hash ${yml_hash} (need ${check_bin})" >&2
     return 1
   fi
 
   echo "==> seed ${target} <= ${src}"
   rm -rf "${target}"
-  cp -a "${src}" "${target}"
+  ln -sfn "${src}" "${target}"
 }
 
 echo "==> seed_easyfuse_conda_envs $(date -Is)"
@@ -42,11 +53,23 @@ echo "==> seed_easyfuse_conda_envs $(date -Is)"
 # Prefer a real mamba create over cp -a (copied prefixes break `conda activate`).
 QC_TARGET="${CONDA_CACHE}/env-dd32f47bd0756865-3ca3e4910cc80d7677b2b976f6b1230f"
 if [[ ! -x "${QC_TARGET}/bin/fastp" ]]; then
-  echo "==> mamba create qc env ${QC_TARGET}"
-  QC_YML="${NEOAG_EASYFUSE_HOME:-${ROOT}/../envs/tools/EasyFuse}/environments/qc.yml"
-  [[ -s "${QC_YML}" ]] || { echo "ERROR: EasyFuse qc.yml not found: ${QC_YML}" >&2; exit 1; }
-  mamba env create -y --prefix "${QC_TARGET}" \
-    --file "${QC_YML}"
+  donor=""
+  for candidate in "${CONDA_CACHE}"/env-*; do
+    [[ -d "${candidate}" ]] || continue
+    [[ "${candidate}" == "${QC_TARGET}" ]] && continue
+    if [[ -x "${candidate}/bin/fastp" ]]; then
+      donor="${candidate}"
+      break
+    fi
+  done
+  if [[ -n "${donor}" ]]; then
+    echo "==> seed qc env ${QC_TARGET} <= ${donor} (no mamba)"
+    rm -rf "${QC_TARGET}"
+    ln -sfn "${donor}" "${QC_TARGET}"
+  else
+    echo "ERROR: no local fastp donor for ${QC_TARGET}; refusing mamba download" >&2
+    exit 1
+  fi
 else
   echo "    ${QC_TARGET}: ready"
 fi

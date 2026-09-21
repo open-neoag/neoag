@@ -83,6 +83,7 @@ def main() -> int:
     matched_candidates: set[tuple[str, str]] = set()
     best_origin: dict[tuple[str, str], dict[str, str]] = {}
     translated_rows = 0
+    skipped_non_intronic_rows = 0
     files = sorted(glob.glob(args.splicemutr_glob, recursive=True))
 
     for source in files:
@@ -91,6 +92,12 @@ def main() -> int:
                 start, end = _int(row.get("start", "")), _int(row.get("end", ""))
                 strand = row.get("strand", "")
                 if start is None or end is None or strand not in {"+", "-"}:
+                    continue
+                # Adjacent exon boundaries do not enclose an intronic base.
+                # They cannot be represented by the canonical 1-based closed
+                # intron model and must not abort processing of valid rows.
+                if end - start <= 1:
+                    skipped_non_intronic_rows += 1
                     continue
                 # SpliceMutr/SNAF corrected tables store the flanking exon
                 # boundary coordinates. Convert them to the first/last
@@ -259,6 +266,7 @@ def main() -> int:
         "sample_id": args.sample_id, "candidate_junctions": len(candidates),
         "candidate_peptide_junction_pairs": sum(len(x) for x in candidates.values()),
         "splicemutr_files": files, "translated_rows_linked_to_candidate_junctions": translated_rows,
+        "skipped_non_intronic_rows": skipped_non_intronic_rows,
         "transcript_hypotheses": len(transcripts), "orfs": len(orfs),
         "peptide_origins": len(origins), "matched_candidate_pairs": len(matched_candidates),
         "formal_candidate_rows": len(formal_candidates),

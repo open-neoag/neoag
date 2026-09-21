@@ -6278,7 +6278,11 @@ def make_patient_report(
     event_top_n: int = 10,
     candidate_top_n: int = 50,
 ) -> None:
-    """Write the template-aligned, sample-agnostic patient HTML report."""
+    """Write the patient report with event-first candidate sections.
+
+    ``candidate_top_n`` limits event rows in sections 5 and 6.  Each event is
+    represented by at most three ranked peptide-HLA candidates.
+    """
     if event_top_n < 1 or candidate_top_n < 1:
         raise ValueError("event_top_n and candidate_top_n must be positive integers")
     p = Path(path)
@@ -6625,51 +6629,56 @@ def make_patient_report(
         out.append("<p class='small'>本次未筛出具有明确机制标记、多工具支持或证据冲突的独立人工审阅事件。</p>")
     out.append("</div>")
 
-    displayed_candidate_count = len(top)
+    displayed_event_count = len(top)
+    displayed_candidate_count = sum(
+        len(event_group_cache[id(row)]["representative_rows"] or [row])
+        for row in top
+    )
     out.append(
         "<div class='section'><h2>5. 当前进入人工复核的疫苗候选事件"
-        f"（按突变/生物学事件去重后{displayed_candidate_count}个）</h2>"
+        f"（{displayed_event_count}个；每个事件最多3条候选肽）</h2>"
     )
 
-    def patient_candidate_rows(rows: list[dict[str, str]]) -> list[list[dict[str, Any]]]:
-        result: list[list[dict[str, Any]]] = []
+    def peptide_candidate_cell(representative: Mapping[str, Any]) -> str:
+        return (
+            f"{_patient_representative_peptide_identity(representative)}；"
+            f"{_patient_representative_peptide_evidence(representative)}；"
+            f"{_patient_peptide_evidence_and_gaps(representative, bundle, val_map)}"
+        )
+
+    def patient_candidate_rows(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
         for rank, row in enumerate(rows, 1):
             event_group = event_group_cache[id(row)]
             epitope_count = event_group["epitope_count"]
             family_count = event_group["epitope_family_count"]
-            representatives = event_group["representative_rows"] or [row]
+            representatives = (event_group["representative_rows"] or [row])[:3]
             event_grade = _patient_event_row_grade(row, event_grade_map)
             event_name = row.get("gene", "") or row.get("event_name", "") or row.get("event_id", "")
-            event_rows: list[dict[str, Any]] = []
-            for subrank, representative in enumerate(representatives, 1):
-                peptide_grade = str(representative.get("evidence_grade") or "UNASSESSED")
-                event_rows.append({
-                    "赛道内排名": track_rank_labels[id(row)],
-                    "突变/事件": event_name,
-                    "类型": _patient_track(row),
-                    "组合概览": (
-                        f"{family_count}个epitope family、{epitope_count}个组合；完整明细见附件"
-                        if subrank == 1 else "同一事件"
-                    ),
-                    "代表肽-HLA": _patient_representative_peptide_identity(representative),
-                    "肽级定量证据": _patient_representative_peptide_evidence(representative),
-                    "等级": f"事件 {event_grade}；肽 {peptide_grade}",
-                    "事件级证据与下一步": _patient_event_evidence_and_next_step(row, bundle, val_map),
-                    "肽级证据与缺口": _patient_peptide_evidence_and_gaps(
-                        representative, bundle, val_map,
-                    ),
-                })
-            result.append(event_rows)
+            cells = [peptide_candidate_cell(representative) for representative in representatives]
+            while len(cells) < 3:
+                cells.append("—")
+            result.append({
+                "赛道内排名": track_rank_labels[id(row)],
+                "突变/事件": event_name,
+                "类型": _patient_track(row),
+                "组合概览": f"{family_count}个epitope family、{epitope_count}个组合；完整明细见附件",
+                "候选肽1": cells[0],
+                "候选肽2": cells[1],
+                "候选肽3": cells[2],
+                "事件等级": event_grade,
+                "事件级证据与下一步": _patient_event_evidence_and_next_step(row, bundle, val_map),
+            })
         return result
 
     candidate_headers = [
-        "赛道内排名", "突变/事件", "类型", "组合概览", "代表肽-HLA", "肽级定量证据", "等级",
-        "事件级证据与下一步", "肽级证据与缺口",
+        "赛道内排名", "突变/事件", "类型", "组合概览", "候选肽1", "候选肽2", "候选肽3",
+        "事件等级", "事件级证据与下一步",
     ]
     out.append(
-        f"<h3>当前展示{displayed_candidate_count}个去重候选事件</h3>"
+        f"<h3>当前展示{displayed_event_count}个去重候选事件、{displayed_candidate_count}个代表Peptide-HLA组合</h3>"
         "<p class='small'>疫苗靶点以突变/融合/剪接等生物学事件为选择单位；同一事件产生的不同肽长、加工位置和HLA组合归在该事件下展示，不重复占据事件排名。"
-        "正文先按突变或连接核心把重叠8–11-mer聚为epitope family，再综合证据等级、Pareto层、NetMHCpan、MHCflurry、加工/稳定性和MT/WT差异选择最多3个代表肽；每个代表肽单独占一行，其余完整组合保留在附件。"
+        "正文先按突变或连接核心把重叠8–11-mer聚为epitope family，再综合证据等级、Pareto层、NetMHCpan、MHCflurry、加工/稳定性和MT/WT差异选择最多3个代表肽；每个事件只占一行，代表肽分别放入候选肽1–3列，其余完整组合保留在附件。"
         "肽段-HLA预测仍作为呈递、MT/WT与安全性证据保留在完整明细表中。本表按事件级证据等级展示候选：R1、R2及R3的三个细分等级"
         "（R3-READY、R3-GAP、R3-REVIEW）。表内不再使用未细分的R3；其中R3-READY表示候选基本合理、"
         "仍需完成指定确认步骤，R3-GAP表示关键资料缺失，R3-REVIEW表示证据冲突或伪影风险需人工复核。"
@@ -6678,16 +6687,30 @@ def make_patient_report(
         "候选仅在各自赛道内编号，不进行跨赛道优劣排序；本表的纳入、阻断、等级和下一步仅由当前证据共识合同生成；"
         "旧加权优先级仅保留在技术比较附件，不参与患者版决策。</p>"
     )
-    out.append(_rowspan_table(
-        patient_candidate_rows(top),
-        candidate_headers,
-        ("赛道内排名", "突变/事件", "类型", "组合概览", "事件级证据与下一步"),
-    ))
+    out.append(_table(patient_candidate_rows(top), candidate_headers))
+    def quantitative_candidate_cell(representative: Mapping[str, Any]) -> str:
+        detail = _patient_presentation_quantitative_row(representative, 0)
+        fields = [
+            detail.get("肽段-HLA", ""), detail.get("肽长/变异位置", ""),
+            detail.get("NetMHCpan原始值", ""), detail.get("MT/WT定量比较", ""),
+            detail.get("MHCflurry原始值", ""), detail.get("稳定性", ""),
+            detail.get("免疫原性辅助模型", ""), detail.get("HLA模型覆盖", ""),
+        ]
+        return "；".join(str(value) for value in fields if str(value).strip())
+
     quantitative_rows = []
     for row in top:
-        quantitative_row = _patient_presentation_quantitative_row(row, 0)
-        quantitative_row["赛道内排名"] = track_rank_labels[id(row)]
-        quantitative_rows.append(quantitative_row)
+        representatives = (event_group_cache[id(row)]["representative_rows"] or [row])[:3]
+        cells = [quantitative_candidate_cell(representative) for representative in representatives]
+        while len(cells) < 3:
+            cells.append("—")
+        quantitative_rows.append({
+            "赛道内排名": track_rank_labels[id(row)],
+            "突变/事件": row.get("gene", "") or row.get("event_name", "") or row.get("event_id", ""),
+            "候选肽1定量结果": cells[0],
+            "候选肽2定量结果": cells[1],
+            "候选肽3定量结果": cells[2],
+        })
     out.append("<h3>呈递与免疫原性定量明细</h3>")
     out.append(
         "<p class='small'>Percentile rank越低表示模型预测越强，便于跨等位基因比较；"
@@ -6695,9 +6718,7 @@ def make_patient_report(
         "若训练覆盖/外推状态未记录，报告保持未评估，不因工具返回数值而推定该HLA属于训练支持等位基因。</p>"
     )
     out.append(_table(quantitative_rows, [
-        "赛道内排名", "肽段-HLA", "肽长/变异位置", "NetMHCpan原始值", "MT/WT定量比较",
-        "突变位置结构解释", "WT自身反应/耐受风险", "MHCflurry原始值", "稳定性",
-        "免疫原性辅助模型", "HLA模型覆盖",
+        "赛道内排名", "突变/事件", "候选肽1定量结果", "候选肽2定量结果", "候选肽3定量结果",
     ]))
     out.append(f"<p class='small'>当前暂缓/不推进及完整性门槛未通过的{len(paused_representatives)}个事件代表候选不进入患者版重点表，仅保留在科研技术版审阅池。排序仍采用R1–R4、同赛道Pareto、确定性tie-break和事件去重。</p></div>")
 
@@ -6713,55 +6734,53 @@ def make_patient_report(
         "R4、hard-fail或来源链未闭环的候选不会为了类型平衡被强行纳入。"
         "本表沿用第5节完全相同的事件去重、epitope family和代表肽选择结果，不重新评分或另选肽段。"
         "同一事件产生的不同肽长、加工位置和HLA组合统一归入该事件，不重复占据审阅位置；"
-        "正文仅展示最多3个决策代表肽，每个代表肽单独占一行，并将事件级判断与肽级证据缺口分开；"
+        "正文每个事件仅占一行，最多3个决策代表肽分别列入候选肽1–3列，并将事件级判断与肽级证据缺口分开；"
         "完整Peptide-HLA明细继续保留用于呈递和安全性核查。建议顺序：先确认事件和异常转录本真实性，"
         "再补RNA alt/VAF或精确junction证据，完成MT/WT、正常背景和限制性HLA复核，最后开展短肽、长肽、"
         "minigene及T细胞功能实验。</p>"
     )
-    interpretation_rows: list[list[dict[str, Any]]] = []
+    interpretation_rows: list[dict[str, Any]] = []
     for row in interpretation_top:
         event_group = event_group_cache[id(row)]
         epitope_count = event_group["epitope_count"]
         family_count = event_group["epitope_family_count"]
-        representatives = event_group["representative_rows"] or [row]
+        representatives = (event_group["representative_rows"] or [row])[:3]
         event_name = row.get("gene", "") or row.get("event_name", "") or row.get("event_id", "")
         event_grade = _patient_event_row_grade(row, event_grade_map)
         event_judgment = _patient_candidate_attention(row, bundle)
-        event_rows: list[dict[str, Any]] = []
-        for subrank, representative in enumerate(representatives, 1):
-            representative_gaps = list(dict.fromkeys(
-                gap for gap in _patient_key_gaps(representative, bundle) if gap
-            ))
-            gap_summary = "；".join(representative_gaps) or "未见明确肽级阻断项；仍需实验确认"
-            peptide_grade = str(representative.get("evidence_grade") or "UNASSESSED")
-            event_rows.append({
-                "赛道内排名": track_rank_labels[id(row)],
-                "突变/事件": event_name,
-                "改变": _patient_event_change(row),
-                "类型": _patient_track(row),
-                "组合概览": (
-                    f"{family_count}个epitope family、{epitope_count}个组合；完整明细见附件"
-                    if subrank == 1 else "同一事件"
-                ),
-                "代表肽-HLA": _patient_representative_peptide_identity(representative),
-                "证据等级与关键定量值": (
-                    f"事件 {event_grade}；肽 {peptide_grade}；"
-                    f"{_patient_representative_peptide_evidence(representative)}"
-                ),
-                "事件级判断": event_judgment,
-                "肽级证据缺口": gap_summary,
-                "建议下一步": _patient_validation(representative, val_map),
-            })
-        interpretation_rows.append(event_rows)
+        candidate_cells = [peptide_candidate_cell(representative) for representative in representatives]
+        while len(candidate_cells) < 3:
+            candidate_cells.append("—")
+        representative_gaps = list(dict.fromkeys(
+            gap
+            for representative in representatives
+            for gap in _patient_key_gaps(representative, bundle)
+            if gap
+        ))
+        gap_summary = "；".join(representative_gaps) or "未见明确肽级阻断项；仍需实验确认"
+        validation_steps = list(dict.fromkeys(
+            _patient_validation(representative, val_map)
+            for representative in representatives
+        ))
+        interpretation_rows.append({
+            "赛道内排名": track_rank_labels[id(row)],
+            "突变/事件": event_name,
+            "改变": _patient_event_change(row),
+            "类型": _patient_track(row),
+            "组合概览": f"{family_count}个epitope family、{epitope_count}个组合；完整明细见附件",
+            "候选肽1": candidate_cells[0],
+            "候选肽2": candidate_cells[1],
+            "候选肽3": candidate_cells[2],
+            "事件等级": event_grade,
+            "事件级判断": event_judgment,
+            "肽级证据缺口": gap_summary,
+            "建议下一步": "；".join(validation_steps),
+        })
     comprehensive_headers = [
-        "赛道内排名", "突变/事件", "改变", "类型", "组合概览", "代表肽-HLA",
-        "证据等级与关键定量值", "事件级判断", "肽级证据缺口", "建议下一步",
+        "赛道内排名", "突变/事件", "改变", "类型", "组合概览", "候选肽1", "候选肽2", "候选肽3",
+        "事件等级", "事件级判断", "肽级证据缺口", "建议下一步",
     ]
-    out.append(_rowspan_table(
-        interpretation_rows,
-        comprehensive_headers,
-        ("赛道内排名", "突变/事件", "改变", "类型", "组合概览", "事件级判断"),
-    ))
+    out.append(_table(interpretation_rows, comprehensive_headers))
     out.append("</div>")
 
     out.append("<div class='section'><h2>7. 分析方法与工具状态</h2>")

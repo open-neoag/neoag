@@ -303,20 +303,37 @@ prebuild_conda_env() {
   local yml="$2"
   local check_bin="$3"
   local prefix="${CONDA_CACHE}/env-${env_id}"
+  local donor=""
 
   if [[ -x "${prefix}/bin/${check_bin}" ]]; then
+    echo "    ${yml}: already ready (${prefix})"
     bash "${ROOT}/scripts/fix_easyfuse_pyeasyfuse_env.sh" >/dev/null 2>&1 || true
     return 0
   fi
 
-  wait_for_mamba_free
-  echo "==> Pre-building EasyFuse ${yml} ..."
-  rm -rf "${prefix}"
-  mamba env create -y \
-    --prefix "${prefix}" \
-    --file "${NEOAG_EASYFUSE_HOME}/environments/${yml}"
-  bash "${ROOT}/scripts/fix_easyfuse_pyeasyfuse_env.sh"
+  # Offline reuse: any existing env-* that already has the required binary.
+  for donor in "${CONDA_CACHE}"/env-*; do
+    [[ -d "${donor}" ]] || continue
+    [[ "${donor}" == "${prefix}" ]] && continue
+    if [[ -x "${donor}/bin/${check_bin}" ]]; then
+      echo "==> Reusing EasyFuse ${yml}: ${prefix} <= ${donor} (no mamba download)"
+      rm -rf "${prefix}"
+      ln -sfn "${donor}" "${prefix}"
+      if [[ -x "${prefix}/bin/${check_bin}" ]]; then
+        bash "${ROOT}/scripts/fix_easyfuse_pyeasyfuse_env.sh" >/dev/null 2>&1 || true
+        return 0
+      fi
+      echo "WARN: symlink reuse failed for ${prefix}; falling through" >&2
+      break
+    fi
+  done
+
+  echo "ERROR: EasyFuse ${yml} needs ${check_bin} at ${prefix}, and no local donor env was found." >&2
+  echo "       Refusing mamba env create (intranet cannot reach conda.anaconda.org)." >&2
+  echo "       Populate ${CONDA_CACHE} from shared_refs/easyfuse_nextflow_conda or a known-good host cache." >&2
+  return 1
 }
+
 
 QC_ENV="${CONDA_CACHE}/env-574d468f667e5ead-1f348f31c1e78ea89e97e435a63f0c7d"
 SRC_ENV="${CONDA_CACHE}/env-adab1ef12c1f56bf-14649bb80e8151aa81731d54781c13cc"
@@ -386,12 +403,7 @@ ensure_easyfuse_entrypoints
 
 REQ_WO_ENV="${CONDA_CACHE}/env-requantification_wo_easyfuse"
 if [[ ! -x "${REQ_WO_ENV}/bin/STAR" ]]; then
-  wait_for_mamba_free
-  echo "==> Pre-building requantification_wo_easyfuse.yml ..."
-  rm -rf "${REQ_WO_ENV}"
-  mamba env create -y \
-    --prefix "${REQ_WO_ENV}" \
-    --file "${NEOAG_EASYFUSE_HOME}/environments/$(select_easyfuse_env_yml requantification_wo_easyfuse.yml requantification.yml)"
+  prebuild_conda_env     "requantification_wo_easyfuse"     "requantification_wo_easyfuse.yml"     "STAR" || exit 1
 fi
 
 bash "${ROOT}/scripts/patch_easyfuse_star_avx2.sh"

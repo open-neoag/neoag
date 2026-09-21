@@ -265,7 +265,7 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--event-top-n", type=int, default=20,
                         help="Number of event-level rows shown per applicable track")
     review.add_argument("--candidate-top-n", type=int, default=100,
-                        help="Number of cross-track peptide candidates shown in the patient report")
+                        help="Number of cross-track event rows shown in patient-report sections 5 and 6; each event shows at most three peptide-HLA candidates")
     review.add_argument("--clinical-context")
     review.add_argument("--disease-profile")
     review.add_argument("--therapy-context", default="research")

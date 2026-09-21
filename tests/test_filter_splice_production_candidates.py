@@ -51,3 +51,28 @@ def test_filter_keeps_only_complete_exact_supported_snaf_candidates(tmp_path):
     assert {record["peptide_id"] for record in rejected} == {"P2", "P3"}
     assert summary["selected_events"] == 1
     assert summary["selected_peptides"] == 1
+
+
+def test_filter_accepts_assessed_empty_input(tmp_path):
+    events = tmp_path / "raw_events.tsv"
+    peptides = tmp_path / "raw_peptides.tsv"
+    consensus = tmp_path / "splice_consensus.tsv"
+    write_tsv(events, [], EVENT_FIELDS)
+    write_tsv(peptides, [], PEPTIDE_FIELDS)
+    write_tsv(consensus, [], ["event_id", "status"])
+    outdir = tmp_path / "selected"
+    subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/filter_splice_production_candidates.py"),
+            "--events", str(events),
+            "--peptides", str(peptides),
+            "--consensus", str(consensus),
+            "--outdir", str(outdir),
+        ],
+        cwd=ROOT,
+        check=True,
+    )
+    summary = json.loads((outdir / "production_filter_summary.json").read_text())
+    assert summary["filter_status"] == "ASSESSED_NO_INPUT_CANDIDATES"
+    assert read_tsv(outdir / "raw_peptides.tsv") == []

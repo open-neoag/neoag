@@ -100,6 +100,9 @@ def main() -> int:
         "selected_events": len(selected_events),
         "selected_peptides": len(selected),
         "rejected_peptides": len(rejected),
+        "filter_status": (
+            "PASS" if selected else "ASSESSED_NO_INPUT_CANDIDATES" if not peptides else "FAILED_ALL_REJECTED"
+        ),
         "peptide_length_range": [args.min_length, args.max_length],
         "exact_junction_status_required": EXACT_STATUS,
         "max_snaf_source_binding_rank": args.max_source_binding_rank,
@@ -108,7 +111,7 @@ def main() -> int:
     (args.outdir / "production_filter_summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    if not selected:
+    if not selected and peptides:
         raise SystemExit("No splice peptide-HLA candidates passed the production filter")
     return 0
 

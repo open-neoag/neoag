@@ -1271,7 +1271,7 @@ def build_parser():
     rp.add_argument("--event-top-n", type=int, default=10,
                     help="Number of event representatives shown per event type in the patient report (default: 10)")
     rp.add_argument("--candidate-top-n", type=int, default=50,
-                    help="Number of cross-track event-deduplicated peptide candidates shown in the patient report (default: 50)")
+                    help="Number of cross-track event rows shown in patient-report sections 5 and 6; each event shows at most three peptide-HLA candidates (default: 50)")
     rp.add_argument("--out", required=True, help="Output path; with --audience both, also writes sibling patient/technical files")
     rp.set_defaults(func=cmd_report)
 
@@ -1445,7 +1445,7 @@ def build_parser():
     rf.add_argument("--event-top-n", type=int, default=20,
                     help="Number of event-level candidates shown per applicable track")
     rf.add_argument("--candidate-top-n", type=int, default=100,
-                    help="Number of cross-track peptide candidates shown in the patient report")
+                    help="Number of cross-track event rows shown in patient-report sections 5 and 6; each event shows at most three peptide-HLA candidates")
     rf.set_defaults(func=cmd_run_full)
 
     bi = sub.add_parser("build-intermediates", help="Build parsed/raw_events + raw_peptides (multi-entry A–F)")

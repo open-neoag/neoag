@@ -144,6 +144,9 @@ def bam_contigs(samtools: str, bam_path: Path) -> dict[str, str]:
 
 def load_bam_metrics(samtools: str, bam_path: Path, keys: set[tuple[str, int, int, str]], workdir: Path):
     workdir.mkdir(parents=True, exist_ok=True)
+    if not keys:
+        (workdir / "candidate_junction_windows.bed").write_text("", encoding="utf-8")
+        return {}
     by_coord = defaultdict(list)
     for key in keys:
         by_coord[key[:3]].append(key)
