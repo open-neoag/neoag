@@ -780,7 +780,13 @@ def test_patient_disease_background_does_not_treat_profile_or_rules_as_diagnosis
     result, basis = _patient_disease_background(profile_bundle)
     assert result == "未提供"
     assert "分析配置和分子知识库关联不会代替临床诊断" in basis
-    assert _patient_analysis_context(profile_bundle)[0] == "sarcoma_rna_supported"
+    assert _patient_analysis_context(profile_bundle)[0] == "fallback_rules"
+
+    profile_only_bundle = ReportBundle(
+        profile={"_profile_name": "/profiles/sarcoma_rna_supported.toml"},
+        events=[], peptides=[], provenance={"profile": "default"},
+    )
+    assert _patient_analysis_context(profile_only_bundle)[0] == "sarcoma_rna_supported"
 
     rules_bundle = ReportBundle(
         profile={"_profile_name": "default"}, events=[], peptides=[],
@@ -790,6 +796,23 @@ def test_patient_disease_background_does_not_treat_profile_or_rules_as_diagnosis
     result, basis = _patient_analysis_context(rules_bundle)
     assert result == "sarcoma_consensus"
     assert "不代表临床诊断" in basis
+
+
+def test_patient_analysis_context_prefers_parallel_consensus_rules_over_weighted_profile():
+    bundle = ReportBundle(
+        profile={"_profile_name": "sarcoma_rna_supported_v2_provisional"},
+        events=[], peptides=[],
+        provenance={
+            "analysis_profile": "sarcoma_rna_supported_v2_provisional",
+            "parallel_rankings": {
+                "rules_name": "sarcoma_evidence_consensus_v3_source_chain",
+                "rules_version": "3.0-alpha1",
+            },
+        },
+    )
+    result, basis = _patient_analysis_context(bundle)
+    assert result == "sarcoma_evidence_consensus_v3_source_chain"
+    assert "加权基线=sarcoma_rna_supported_v2_provisional" in basis
 
 
 def test_patient_disease_background_does_not_guess_from_paths():

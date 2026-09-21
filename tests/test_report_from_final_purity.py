@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from neoag.report_from_final import _declared_purity_results, _input_files, _purity_records
+from neoag.report_from_final import _declared_purity_results, _input_files, _purity_records, enrich_report_provenance
 from neoag.utils import write_tsv
 
 
@@ -100,3 +100,18 @@ def test_declared_purity_stages_are_discovered_without_fixed_tool_list(tmp_path:
     }
 
     assert _declared_purity_results(manifest) == {"NEWCALLER": custom}
+
+
+def test_report_enrichment_removes_legacy_profile_derived_disease(tmp_path: Path):
+    final_dir = tmp_path / "production" / "final"
+    final_dir.mkdir(parents=True)
+    profile = "sarcoma_rna_supported_v2_provisional"
+    enriched = enrich_report_provenance(
+        final_dir,
+        {"profile": profile, "disease": profile},
+        manifest={"run": {}},
+        generated={"sample": {"profile": profile}},
+    )
+    assert "disease" not in enriched
+    assert enriched["profile_derived_disease_removed"] == profile
+    assert enriched["analysis_profile"] == profile

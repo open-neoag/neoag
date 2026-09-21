@@ -340,6 +340,18 @@ def enrich_report_provenance(
     if isinstance(clinical_context, Mapping):
         # A cohort contract selects a knowledge file, but never supplies a patient diagnosis.
         prov["clinical_context"] = {**dict(prov.get("clinical_context") or {}), **dict(clinical_context)}
+    explicit_clinical_context = prov.get("clinical_context") if isinstance(prov.get("clinical_context"), Mapping) else {}
+    explicit_diagnosis = any(
+        str(explicit_clinical_context.get(key) or "").strip()
+        for key in ("diagnosis", "clinical_diagnosis", "disease", "tumor_type", "cancer_type")
+    )
+    legacy_disease = str(prov.get("disease") or "").strip()
+    if stem and legacy_disease and Path(legacy_disease).stem == stem and not explicit_diagnosis:
+        # Older report rebuilds inferred a disease label from the analysis
+        # profile.  Remove only that exact stale value; a real structured
+        # diagnosis must come from clinical_context.
+        prov.pop("disease", None)
+        prov["profile_derived_disease_removed"] = legacy_disease
     clinical_context_source = str(run_metadata.get("clinical_context_source") or "").strip()
     if clinical_context_source:
         prov["clinical_context_source"] = clinical_context_source

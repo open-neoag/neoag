@@ -5844,18 +5844,20 @@ def _patient_disease_background(bundle: ReportBundle) -> tuple[str, str]:
 
 
 def _patient_analysis_context(bundle: ReportBundle) -> tuple[str, str]:
-    """Describe the active computational profile separately from clinical diagnosis."""
+    """Describe the authoritative consensus rules separately from the baseline profile."""
     provenance = bundle.provenance
 
     def meaningful(value: Any) -> str:
         text = str(value or "").strip()
         return "" if text.lower() in {"", "none", "na", "n/a", "unknown", "unassessed", "default"} else text
 
-    profile_name = meaningful(bundle.profile.get("_profile_name") or provenance.get("profile"))
-    if profile_name and profile_name.lower() not in {"evidence_consensus"}:
-        return Path(profile_name).stem, "计算分析配置；不代表临床诊断"
-
-    rules_name = meaningful(provenance.get("rules_name"))
+    parallel = provenance.get("parallel_rankings") if isinstance(provenance.get("parallel_rankings"), Mapping) else {}
+    consensus = provenance.get("evidence_consensus") if isinstance(provenance.get("evidence_consensus"), Mapping) else {}
+    rules_name = meaningful(
+        provenance.get("rules_name")
+        or parallel.get("rules_name")
+        or consensus.get("rules_name")
+    )
     if not rules_name:
         rules = provenance.get("rules")
         if isinstance(rules, Mapping):
@@ -5863,7 +5865,21 @@ def _patient_analysis_context(bundle: ReportBundle) -> tuple[str, str]:
         elif rules:
             rules_name = meaningful(rules)
     if rules_name:
-        return Path(rules_name).stem, "排序/分析规则配置；不代表临床诊断"
+        baseline = meaningful(
+            provenance.get("analysis_profile")
+            or bundle.profile.get("_profile_name")
+            or provenance.get("profile")
+        )
+        baseline_note = f"；加权基线={Path(baseline).stem}" if baseline and Path(baseline).stem != Path(rules_name).stem else ""
+        return Path(rules_name).stem, f"最终证据共识与R1-R4分层规则{baseline_note}；不代表临床诊断"
+
+    profile_name = meaningful(
+        provenance.get("analysis_profile")
+        or bundle.profile.get("_profile_name")
+        or provenance.get("profile")
+    )
+    if profile_name and profile_name.lower() not in {"evidence_consensus"}:
+        return Path(profile_name).stem, "仅记录加权基线配置；未找到独立证据共识规则；不代表临床诊断"
 
     return "未记录", "未记录非默认分析profile或排序配置"
 
@@ -5873,10 +5889,18 @@ def _patient_qc_rows(bundle: ReportBundle) -> list[dict[str, str]]:
     purity_result, purity_basis = _patient_purity_consensus(bundle)
     diagnosis_result, diagnosis_basis = _patient_disease_background(bundle)
     analysis_result, analysis_basis = _patient_analysis_context(bundle)
+    weighted_profile = str(
+        bundle.provenance.get("analysis_profile")
+        or bundle.profile.get("_profile_name")
+        or bundle.provenance.get("profile")
+        or "未记录"
+    )
+    weighted_profile = Path(weighted_profile).stem if weighted_profile != "未记录" else weighted_profile
     anchor_result, anchor_basis = _patient_molecular_anchor_summary(bundle)
     rows = [
         {"项目": "结构化临床诊断", "结果": diagnosis_result, "解释": diagnosis_basis},
         {"项目": "分析配置", "结果": analysis_result, "解释": analysis_basis},
+        {"项目": "加权基线配置", "结果": weighted_profile, "解释": "仅用于保留旧加权排序对照，不是最终R1-R4证据共识配置"},
         {"项目": "分子知识库锚定", "结果": anchor_result, "解释": anchor_basis},
         {"项目": "肿瘤/正常配对", "结果": str(provenance.get("pairing_status") or "最终清单未确认配对状态"), "解释": "区分已使用配对输入与已完成指纹确认"},
         {"项目": "肿瘤纯度/倍性", "结果": purity_result, "解释": "用于CNV和LOH解释；工具冲突必须保留"},
