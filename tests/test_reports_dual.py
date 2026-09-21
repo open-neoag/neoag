@@ -66,6 +66,9 @@ def test_patient_report_is_plain_language(tmp_path):
     assert "<th>事件级判断</th>" in section6
     assert "<th>肽级证据缺口</th>" in section6
     assert "<th>建议下一步</th>" in section6
+    assert "<table class='portfolio-table'>" in section6
+    assert "<col style='width:7%'>" in section6
+    assert ".event-top-table,.portfolio-table{table-layout:fixed}" in text
     assert "Safety-focused validation before efficacy assay" not in section6
     assert "<th>呈递工具</th>" not in section6
     assert "基因表达 12.3400 TPM" in text
@@ -670,12 +673,12 @@ def test_patient_event_evidence_is_compact_and_omits_rna_source():
     assert "raw_events" not in text
 
 
-def test_patient_fusion_table_collapses_same_peptide_hla_across_hypotheses():
+def test_patient_fusion_table_collapses_gene_pair_across_hypotheses():
     events = [
         {
             "event_id": "FUSION_ENOPH1_EWSR1_chr4_82430884_chr22_29292137",
             "event_type": "Fusion", "gene": "ENOPH1::EWSR1",
-            "best_peptide": "AEVTVILL", "best_hla_allele": "HLA-B*40:01",
+            "best_peptide": "DIFFERENT", "best_hla_allele": "HLA-A*02:01",
         },
         {
             "event_id": "FUSION_ENOPH1_EWSR1_chr4_82430913_chr22_29292137",
@@ -688,6 +691,42 @@ def test_patient_fusion_table_collapses_same_peptide_hla_across_hypotheses():
     assert selected[0]["patient_display_hypothesis_count"] == "2"
     assert "82430884" in selected[0]["patient_display_member_event_ids"]
     assert "82430913" in selected[0]["patient_display_member_event_ids"]
+
+
+def test_patient_candidate_section_has_one_row_per_fusion_gene_pair(tmp_path):
+    bundle = _bundle()
+    common_event = {
+        "event_type": "Fusion", "gene": "EWSR1::WT1", "best_evidence_grade": "R3",
+    }
+    common_peptide = {
+        "event_type": "Fusion", "gene": "EWSR1::WT1", "evidence_grade": "R3",
+        "source_chain_confidence_tier": "C2", "safety_status": "PASS",
+    }
+    bundle.events = [
+        {**common_event, "event_id": "FUSION_EWSR1_WT1_BREAKPOINT_1"},
+        {**common_event, "event_id": "FUSION_EWSR1_WT1_BREAKPOINT_2"},
+    ]
+    bundle.peptides = [
+        {
+            **common_peptide, "peptide_id": "FP1", "event_id": "FUSION_EWSR1_WT1_BREAKPOINT_1",
+            "peptide": "SYGQQSAAA", "hla_allele": "HLA-A*02:01",
+        },
+        {
+            **common_peptide, "peptide_id": "FP2", "event_id": "FUSION_EWSR1_WT1_BREAKPOINT_2",
+            "peptide": "GQQSEKPYK", "hla_allele": "HLA-A*11:01",
+        },
+    ]
+    out = tmp_path / "patient_fusion_gene_pair.html"
+    make_patient_report(out, bundle, candidate_top_n=100)
+    text = out.read_text(encoding="utf-8")
+    section = text.split("5. 当前进入人工复核的疫苗候选事件", 1)[1].split(
+        "6. mRNA疫苗组合候选事件与实验建议", 1,
+    )[0]
+    candidate_table = section.split("</table>", 1)[0]
+    assert "（1个；每个事件最多3条候选肽）" in text
+    assert candidate_table.count("<td>EWSR1::WT1</td>") == 1
+    assert "SYGQQSAAA / HLA-A*02:01" in candidate_table
+    assert "GQQSEKPYK / HLA-A*11:01" in candidate_table
 
 
 def test_patient_report_top_limits_are_configurable(tmp_path):
@@ -1321,11 +1360,13 @@ def test_patient_event_top_moves_track_common_not_applicable_evidence_to_intro(t
     make_patient_report(out, bundle, event_top_n=1)
     text = out.read_text(encoding="utf-8")
     section = text.split("<h3>Splice Top 1</h3>", 1)[1].split("</table>", 1)[0]
-    intro, table = section.split("<table>", 1)
+    intro, table = section.split("<table class='event-top-table'>", 1)
     assert "本赛道证据口径" in intro
     assert "普通点突变式DNA VAF" in intro
     assert "传统MT/WT配对" in intro
     assert "不再逐行重复不适用项" in intro
+    assert "<col style='width:13%'>" in table
+    assert ".event-top-table,.portfolio-table{table-layout:fixed}" in text
     assert "MT/WT=传统点突变式配对不适用" not in table
     assert "DNA证据：点突变VCF口径不适用" not in table
 

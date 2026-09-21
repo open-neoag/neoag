@@ -25,6 +25,8 @@ REPORT_CSS = """
 body{font-family:Arial,sans-serif;margin:32px;color:#222;line-height:1.45;max-width:1100px}
 h1,h2,h3{color:#17324d}.section{margin-top:28px}
 table{border-collapse:collapse;width:100%;margin:12px 0 24px}th,td{border:1px solid #ddd;padding:7px;font-size:12px;vertical-align:top}th{background:#f3f6f9}
+.event-top-table,.portfolio-table{table-layout:fixed}.event-top-table th,.event-top-table td,.portfolio-table th,.portfolio-table td{overflow-wrap:anywhere;word-break:break-word}
+.portfolio-table th,.portfolio-table td{padding:5px;font-size:11px}
 .badge{padding:3px 7px;border-radius:8px;font-size:12px;display:inline-block}.PASS{background:#d6f5d6}.CAUTION{background:#fff1b8}.FAIL{background:#ffd6d6}.UNASSESSED{background:#eee;color:#555}
 .card{border:1px solid #ddd;border-radius:10px;padding:14px;margin:12px 0;box-shadow:0 1px 4px #eee}
 .small{color:#555;font-size:13px}.mono{font-family:Menlo,Consolas,monospace;font-size:11px;word-break:break-all}
@@ -693,9 +695,24 @@ def _badge(text: str) -> str:
     return f"<span class='badge {cls}'>{esc(text)}</span>"
 
 
-def _table(rows: list[Mapping[str, Any]], headers: list[str], *, max_rows: int | None = None) -> str:
+def _table(
+    rows: list[Mapping[str, Any]],
+    headers: list[str],
+    *,
+    max_rows: int | None = None,
+    table_class: str = "",
+    column_widths: list[str] | None = None,
+) -> str:
     view = rows[:max_rows] if max_rows else rows
-    out = ["<table><tr>" + "".join(f"<th>{esc(h)}</th>" for h in headers) + "</tr>"]
+    class_attr = f" class='{esc(table_class)}'" if table_class else ""
+    colgroup = ""
+    if column_widths:
+        if len(column_widths) != len(headers):
+            raise ValueError("column_widths must match headers")
+        colgroup = "<colgroup>" + "".join(
+            f"<col style='width:{esc(width)}'>" for width in column_widths
+        ) + "</colgroup>"
+    out = [f"<table{class_attr}>{colgroup}<tr>" + "".join(f"<th>{esc(h)}</th>" for h in headers) + "</tr>"]
     for row in view:
         out.append("<tr>" + "".join(f"<td>{esc(row.get(h, ''))}</td>" for h in headers) + "</tr>")
     out.append("</table>")
@@ -2627,19 +2644,35 @@ def _patient_track(row: Mapping[str, Any]) -> str:
 
 def _patient_representatives(rows: list[dict[str, str]], limit: int, track: str | None = None) -> list[dict[str, str]]:
     selected: list[dict[str, str]] = []
-    seen_events: set[str] = set()
+    selected_by_display_key: dict[str, dict[str, str]] = {}
     for row in rows:
-        if track and _patient_track(row) != track:
+        row_track = _patient_track(row)
+        if track and row_track != track:
             continue
         event_id = str(row.get("event_id") or row.get("event_name") or row.get("peptide_id") or "")
         event_key = event_id or identity_value(row, "event_identity_id")
-        if event_key in seen_events:
+        display_key = _patient_display_candidate_key(row, row_track) or event_key
+        retained = selected_by_display_key.get(display_key)
+        if retained is not None:
+            member_ids = _patient_event_keys(retained)
+            for member_id in _patient_event_keys(row):
+                if member_id not in member_ids:
+                    member_ids.append(member_id)
+            retained["member_event_ids"] = ";".join(member_ids)
+            retained["patient_display_member_event_ids"] = ";".join(member_ids)
+            retained["patient_display_hypothesis_count"] = str(
+                int(retained.get("patient_display_hypothesis_count") or "1") + 1
+            )
             continue
-        seen_events.add(event_key)
         annotated = dict(row)
         for field, value in candidate_identity(row).items():
             annotated.setdefault(field, value)
+        member_ids = _patient_event_keys(row)
+        annotated["member_event_ids"] = ";".join(member_ids)
+        annotated["patient_display_member_event_ids"] = ";".join(member_ids)
+        annotated["patient_display_hypothesis_count"] = "1"
         selected.append(annotated)
+        selected_by_display_key[display_key] = annotated
         if len(selected) >= limit:
             break
     return selected
@@ -3052,10 +3085,8 @@ def _patient_display_candidate_key(row: Mapping[str, Any], track: str) -> str:
         return fallback
 
     gene_pair = re.sub(r"\s+", "", str(row.get("gene") or row.get("event_name") or "")).upper()
-    peptide = re.sub(r"[^A-Z]", "", str(row.get("best_peptide") or row.get("peptide") or "").upper())
-    hla = re.sub(r"[^A-Z0-9]", "", str(row.get("best_hla_allele") or row.get("hla_allele") or "").upper())
-    if "::" in gene_pair and peptide and hla:
-        return f"FUSION_DISPLAY|{gene_pair}|{peptide}|{hla}"
+    if "::" in gene_pair:
+        return f"FUSION_DISPLAY|{gene_pair}"
     return fallback
 
 
@@ -6640,7 +6671,19 @@ def make_patient_report(
         if track == "Fusion":
             headers.append("融合叙事分层")
         headers.append("关键证据与下一步")
-        out.append(_table(rows, headers))
+        column_widths = (
+            ["5%", "13%", "12%", "13%", "7%", "14%", "36%"]
+            if track == "Fusion"
+            else ["5%", "15%", "13%", "15%", "8%", "44%"]
+        )
+        out.append(
+            _table(
+                rows,
+                headers,
+                table_class="event-top-table",
+                column_widths=column_widths,
+            )
+        )
     out.append(f"<p class='small'>不同事件赛道的证据结构不同，Top {event_top_n}用于赛道内审阅，不应仅凭序号直接跨赛道比较。</p></div>")
 
     manual_review_rows = _patient_manual_review_rows(bundle.events, ranked, bundle, val_map)
@@ -6804,7 +6847,17 @@ def make_patient_report(
         "赛道内排名", "突变/事件", "改变", "类型", "组合概览", "候选肽1", "候选肽2", "候选肽3",
         "事件等级", "事件级判断", "肽级证据缺口", "建议下一步",
     ]
-    out.append(_table(interpretation_rows, comprehensive_headers))
+    out.append(
+        _table(
+            interpretation_rows,
+            comprehensive_headers,
+            table_class="portfolio-table",
+            column_widths=[
+                "5%", "10%", "7%", "5%", "8%", "9%", "9%", "9%",
+                "6%", "9%", "11%", "12%",
+            ],
+        )
+    )
     out.append("</div>")
 
     out.append("<div class='section'><h2>7. 分析方法与工具状态</h2>")
