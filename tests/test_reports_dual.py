@@ -715,6 +715,10 @@ def test_patient_candidate_section_has_one_row_per_fusion_gene_pair(tmp_path):
             **common_peptide, "peptide_id": "FP2", "event_id": "FUSION_EWSR1_WT1_BREAKPOINT_2",
             "peptide": "GQQSEKPYK", "hla_allele": "HLA-A*11:01",
         },
+        {
+            **common_peptide, "peptide_id": "FP3", "event_id": "FUSION_EWSR1_WT1_BREAKPOINT_1",
+            "peptide": "YGQQSAAAK", "hla_allele": "HLA-B*07:02",
+        },
     ]
     out = tmp_path / "patient_fusion_gene_pair.html"
     make_patient_report(out, bundle, candidate_top_n=100)
@@ -725,6 +729,7 @@ def test_patient_candidate_section_has_one_row_per_fusion_gene_pair(tmp_path):
     candidate_table = section.split("</table>", 1)[0]
     assert "（1个；每个事件最多3条候选肽）" in text
     assert candidate_table.count("<td>EWSR1::WT1</td>") == 1
+    assert "患者报告已合并展示2个断点/转录本假设" in candidate_table
     assert "SYGQQSAAA / HLA-A*02:01" in candidate_table
     assert "GQQSEKPYK / HLA-A*11:01" in candidate_table
 

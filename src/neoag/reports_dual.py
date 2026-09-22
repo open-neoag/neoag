@@ -2660,9 +2660,7 @@ def _patient_representatives(rows: list[dict[str, str]], limit: int, track: str 
                     member_ids.append(member_id)
             retained["member_event_ids"] = ";".join(member_ids)
             retained["patient_display_member_event_ids"] = ";".join(member_ids)
-            retained["patient_display_hypothesis_count"] = str(
-                int(retained.get("patient_display_hypothesis_count") or "1") + 1
-            )
+            retained["patient_display_hypothesis_count"] = str(len(member_ids) or 1)
             continue
         annotated = dict(row)
         for field, value in candidate_identity(row).items():
@@ -3120,13 +3118,11 @@ def _patient_event_representatives(
         display_key = _patient_display_candidate_key(combined, track)
         if display_key in selected_by_display_key:
             retained = selected_by_display_key[display_key]
-            retained["patient_display_hypothesis_count"] = str(
-                int(retained.get("patient_display_hypothesis_count") or "1") + 1
-            )
             retained_ids = _patient_event_keys(retained)
             for key in keys:
                 if key not in retained_ids:
                     retained_ids.append(key)
+            retained["patient_display_hypothesis_count"] = str(len(retained_ids) or 1)
             retained["patient_display_member_event_ids"] = ";".join(retained_ids)
             seen.update(keys or [event_key])
             continue
