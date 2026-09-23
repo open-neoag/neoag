@@ -549,6 +549,21 @@ run_lohhla() {
   else
     copynum_abs="$(cd "$(dirname "${copynum_input}")" && pwd -P)/$(basename "${copynum_input}")"
   fi
+  # 100T LOHHLAscript.R dropped --BAMDir / --LOHHLA_loc; keep old flags only if present.
+  local bam_n_arg bam_t_arg extra_bamdir extra_loc
+  extra_bamdir=()
+  extra_loc=()
+  if grep -q '\-\-BAMDir' "${LOHHLA_SCRIPT}" && grep -q 'make_option("--BAMDir"' "${LOHHLA_SCRIPT}"; then
+    extra_bamdir=(--BAMDir "${bam_dir_abs}")
+    bam_n_arg="${normal_bam_name}"
+    bam_t_arg="${tumor_bam_name}"
+  else
+    bam_n_arg="${normal_bam}"
+    bam_t_arg="${tumor_bam}"
+  fi
+  if grep -q 'make_option("--LOHHLA_loc"' "${LOHHLA_SCRIPT}"; then
+    extra_loc=(--LOHHLA_loc "${LOHHLA_HOME}")
+  fi
   # LOHHLA later invokes samtools with BAM basenames. Run inside the resolved
   # common BAM directory so this upstream relative-path behavior remains valid.
   (
@@ -556,9 +571,9 @@ run_lohhla() {
   "${FUSION_ENV}/bin/Rscript" "${LOHHLA_SCRIPT}" \
     --patientId "${PATIENT_ID}" \
     --outputDir "${lohhla_out_abs}" \
-    --BAMDir "${bam_dir_abs}" \
-    --normalBAMfile "${normal_bam_name}" \
-    --tumorBAMfile "${tumor_bam_name}" \
+    "${extra_bamdir[@]}" \
+    --normalBAMfile "${bam_n_arg}" \
+    --tumorBAMfile "${bam_t_arg}" \
     --hlaPath "${winners_abs}" \
     --HLAfastaLoc "${hla_fasta_abs}" \
     --CopyNumLoc "${copynum_abs}" \
@@ -570,7 +585,7 @@ run_lohhla() {
     --minCoverageFilter "${MIN_COVERAGE}" \
     --cleanUp FALSE \
     --gatkDir "${LOHHLA_GATK_RUNTIME_DIR}" \
-    --LOHHLA_loc "${LOHHLA_HOME}" \
+    "${extra_loc[@]}" \
     --novoDir "${NOVO_DIR}" \
     --HLAexonLoc "${HLA_EXON_LOC}"
   )

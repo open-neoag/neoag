@@ -3,7 +3,7 @@ import gzip
 import json
 from pathlib import Path
 
-from neoag.reports_dual import ReportBundle, _apply_patient_gene_expression, _augment_runtime_tool_provenance, _find_bam_input, _patient_analysis_context, _patient_conflict_summary, _patient_disease_background, _patient_dna_evidence, _patient_dna_rna_interpretation, _patient_event_grade_counts, _patient_event_representatives, _patient_evidence_audit_rows, _patient_evidence_summary, _patient_event_change, _patient_expression_tpm_map, _patient_fusion_artifact_review, _patient_fusion_boundary_evidence, _patient_hla_loh_consensus, _patient_key_gaps, _patient_limitation, _patient_manual_review_rows, _patient_metric, _patient_presentation_metric, _patient_presentation_quantitative_row, _patient_rna_measurements, _patient_rna_metric, _patient_safety_dimensions, _patient_safety_gap, _patient_tool_rows, _patient_track, _patient_validation, _replace_gene_ids, load_report_bundle, make_dual_reports, make_patient_report, make_technical_report
+from neoag.reports_dual import ReportBundle, _apply_patient_gene_expression, _augment_runtime_tool_provenance, _find_bam_input, _patient_analysis_context, _patient_conflict_summary, _patient_disease_background, _patient_dna_evidence, _patient_dna_rna_interpretation, _patient_event_grade_counts, _patient_event_representatives, _patient_evidence_audit_rows, _patient_evidence_summary, _patient_event_change, _patient_expression_tpm_map, _patient_fusion_artifact_review, _patient_fusion_boundary_evidence, _patient_hla_loh_consensus, _patient_key_gaps, _patient_limitation, _patient_manual_review_rows, _patient_metric, _patient_presentation_metric, _patient_presentation_quantitative_row, _patient_priority_next_step, _patient_r3_excluded_from_focus_rows, _patient_rna_measurements, _patient_rna_metric, _patient_safety_dimensions, _patient_safety_gap, _patient_tool_rows, _patient_track, _patient_validation, _patient_verification_bottleneck, _replace_gene_ids, load_report_bundle, make_dual_reports, make_patient_report, make_technical_report
 from neoag.reports_dual import _patient_ccf_coverage_rows, _patient_clonality_boundary, _patient_coding_variant_rna_rows, _patient_experiment_entry_gate_rows, _patient_fusion_narrative_rows, _patient_fusion_narrative_tier, _patient_splice_funnel_rows
 from neoag.reports_dual import _patient_event_group_cache
 from neoag.utils import write_tsv
@@ -2618,3 +2618,150 @@ def test_resumed_result_recovers_case_metadata_purity_and_hla_loh(tmp_path):
     assert "计算评分 0.4286" in text
     assert "mutation、protein、flow、ligandome" in text
     assert "computational_proxy" in text
+def _safety_first_validation_row():
+    return {
+        "peptide_id": "PX",
+        "recommended_use": "Safety-focused validation before efficacy assay",
+        "safety_status": "SAFETY_PARTIAL",
+        "final_priority": "C_CAUTION",
+        "source_chain_confidence_tier": "C2",
+        "presentation_consensus_state": "PRESENTATION_CONCORDANT",
+        "presentation_evidence_grade": "A",
+        "hla_allele": "HLA-A*02:01",
+        "peptide": "AAAAAAAAA",
+    }
+
+
+def test_verification_bottlenecks_are_event_specific_not_uniform_safety():
+    fusion = {
+        **_safety_first_validation_row(),
+        "event_type": "Fusion",
+        "gene": "GENEA::GENEB",
+        "candidate_union_source": "TARGETED_RESCUE",
+        "source_tools": "arriba;targeted_rescue",
+        "evidence_conflict_fields": "rna_junction_reads,dna_sv_confirmation_status",
+        "orf_id": "ORF1",
+    }
+    source_chain = {
+        **_safety_first_validation_row(),
+        "event_type": "SNV",
+        "gene": "GENE_C",
+        "source_chain_confidence_tier": "",
+        "rna_alt_reads": "70",
+        "rna_depth": "149",
+        "netmhcpan_mt_rank_el": "0.4",
+        "netmhcpan_wt_rank_el": "2.0",
+        "mutant_specificity_status": "MT_PREFERRED",
+    }
+    tpm_gap = {
+        **_safety_first_validation_row(),
+        "event_type": "SNV",
+        "gene": "GENE_D",
+        "transcript_expression_tpm": "0",
+        "rna_alt_reads": "20",
+        "rna_depth": "28",
+    }
+    mild_mtwt = {
+        **_safety_first_validation_row(),
+        "event_type": "SNV",
+        "gene": "GENE_E",
+        "rna_alt_reads": "17",
+        "rna_depth": "63",
+        "mutant_specificity_status": "MARGINAL_MT_ADVANTAGE",
+        "netmhcpan_mt_rank_el": "0.8",
+        "netmhcpan_wt_rank_el": "1.5",
+    }
+    abundant_rna = {
+        **_safety_first_validation_row(),
+        "event_type": "SNV",
+        "gene": "GENE_F",
+        "rna_alt_reads": "648",
+        "rna_depth": "1686",
+        "mutant_specificity_status": "MT_PREFERRED",
+        "netmhcpan_mt_rank_el": "0.2",
+        "netmhcpan_wt_rank_el": "8.0",
+        "ccf_status": "UNASSESSED",
+    }
+    codes = []
+    steps = []
+    for row in (fusion, source_chain, tpm_gap, mild_mtwt, abundant_rna):
+        code, step = _patient_verification_bottleneck(row)
+        codes.append(code)
+        steps.append(_patient_priority_next_step(row, {}))
+        assert "再考虑有效性实验" not in step
+    assert codes == [
+        "FUSION_CALLER_OR_EVIDENCE_SOURCE_CONFLICT",
+        "SOURCE_CHAIN_C_INCOMPLETE",
+        "TRANSCRIPT_TPM_ZERO_WITH_SITE_RNA",
+        "MILD_MTWT_WITH_CONSISTENT_PRESENTATION",
+        "RNA_SUFFICIENT_FOCUS_SPECIFICITY_AND_CCF",
+    ]
+    assert "正式caller/定向救回" in steps[0]
+    assert "来源链C等级" in steps[1]
+    assert "不能仅凭TPM=0判定RNA结果错误" in steps[2]
+    assert "避免仅凭一致预测推进" in steps[3]
+    assert "不把增加RNA深度列为主要任务" in steps[4]
+    assert "CCF为何不可靠" in steps[4]
+    assert len(set(steps)) == 5
+
+
+def test_tpm_zero_with_site_rna_is_not_treated_as_rna_error():
+    row = {
+        "event_type": "SNV",
+        "transcript_expression_tpm": "0",
+        "rna_alt_reads": "20",
+        "rna_depth": "28",
+        "source_chain_confidence_tier": "C2",
+        "peptide": "AAAAAAAAA",
+        "hla_allele": "HLA-A*02:01",
+    }
+    gaps = _patient_key_gaps(row, _bundle())
+    assert any("不能仅凭TPM=0判定RNA结果错误" in item for item in gaps)
+    assert _patient_verification_bottleneck(row)[0] == "TRANSCRIPT_TPM_ZERO_WITH_SITE_RNA"
+
+
+def test_r3_peptide_source_unverified_is_listed_outside_technical_pool(tmp_path):
+    bundle = _bundle()
+    events = []
+    peptides = []
+    for index in range(5):
+        event_id = f"S{index}"
+        events.append({
+            "event_id": event_id, "gene": f"GENE{index}", "event_type": "SNV",
+            "best_evidence_grade": "R3", "manual_review_required": "yes",
+            "cancer_driver_context": "DRIVER_CONTEXT",
+            "source_tools": "caller1;caller2",
+        })
+        peptides.append({
+            "event_id": event_id, "gene": f"GENE{index}", "event_type": "SNV",
+            "peptide": "AAAAAAAAA", "hla_allele": "HLA-A*02:01",
+            "peptide_id": f"P{index}",
+            "source_chain_confidence_tier": "C2",
+        })
+    for event_id, gene, status in (
+        ("F_MTG", "MTG2::PARTNER", "ORF_PEPTIDE_UNAVAILABLE_REVIEW_ONLY"),
+        ("F_UNCX", "UNCX::PARTNER", "EXPLORATION_ORF_REQUIRED"),
+    ):
+        events.append({
+            "event_id": event_id, "gene": gene, "event_type": "Fusion",
+            "best_evidence_grade": "R3", "manual_review_required": "yes",
+            "source_chain_orthogonal_status": "SUPPORTED",
+            "peptide_status": status if status.startswith("ORF") else "",
+            "fusion_candidate_pool": "" if status.startswith("ORF") else status,
+        })
+    bundle.events = events
+    bundle.peptides = peptides
+    focus = _patient_manual_review_rows(events, peptides, bundle, {}, limit=5)
+    assert [row["事件"] for row in focus] == [f"GENE{i}" for i in range(5)]
+    excluded = _patient_r3_excluded_from_focus_rows(events, peptides, bundle, focus)
+    labels = [row["事件"] for row in excluded]
+    assert "MTG2::PARTNER" in labels
+    assert "UNCX::PARTNER" in labels
+    assert all("肽段来源尚未核实" in row["未入选门槛"] for row in excluded)
+    out = tmp_path / "patient_r3_exclusion.html"
+    make_patient_report(out, bundle, candidate_top_n=5)
+    text = out.read_text(encoding="utf-8")
+    assert "未进入本重点表的R3事件" in text
+    assert "肽段来源尚未核实" in text
+    assert "不与上述技术池数量混写" in text
+    assert "2个R3事件未进入重点表" in text
