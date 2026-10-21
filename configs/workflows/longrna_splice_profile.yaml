@@ -6,10 +6,13 @@ inputs:
   longrna_fastq_dir: ""
   sample_id: ""
   hla_file: ""
+  shortread_comparisons: ""
+  normal_junctions: ""
   reference_manifest: configs/references/reference_manifest.yaml
 
 parameters:
   threads: 8
+  retention: standard
   peptide_lengths: [8, 9, 10, 11]
   min_junction_reads: 3
   require_complete_cds: true
@@ -37,3 +40,4 @@ evidence_policy:
   missing_optional_evidence: UNASSESSED
   single_tool_support: LOW_CONFIDENCE
   multi_tool_support: HIGH_CONFIDENCE
+  missing_normal_background: UNASSESSED

@@ -87,13 +87,21 @@ def junction_tx_boundaries(exons: list[tuple[int, int, str]]) -> dict[tuple[int,
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--sample-id", required=True)
     parser.add_argument("--sqanti-classification", required=True, type=Path)
     parser.add_argument("--sqanti-junctions", required=True, type=Path)
     parser.add_argument("--corrected-gtf", required=True, type=Path)
     parser.add_argument("--td2-peptides", required=True, type=Path)
     parser.add_argument("--shortread-comparisons", required=True, type=Path)
+    parser.add_argument(
+        "--normal-junctions",
+        type=Path,
+        help="Optional TSV with junction_key values observed in a normal background cohort",
+    )
     parser.add_argument("--hla", required=True, type=Path)
     parser.add_argument("--outdir", required=True, type=Path)
+    parser.add_argument("--min-junction-reads", type=int, default=3)
+    parser.add_argument("--min-psauron-score", type=float, default=0.8)
     parser.add_argument("--peptide-lengths", default="", help="Explicit comma-separated MHC-I lengths")
     parser.add_argument("--high-recall-12mer", action="store_true", help="Use 8,9,10,11,12 unless explicit lengths are provided")
     args = parser.parse_args()
@@ -104,7 +112,17 @@ def main() -> int:
     if not peptide_lengths or any(length < 8 or length > 14 for length in peptide_lengths):
         parser.error("--peptide-lengths must contain comma-separated values from 8 through 14")
 
+    if args.min_junction_reads < 1:
+        parser.error("--min-junction-reads must be at least 1")
+    if not 0 <= args.min_psauron_score <= 1:
+        parser.error("--min-psauron-score must be between 0 and 1")
+
     shortread_keys = {row.get("junction_key", "") for row in rows(args.shortread_comparisons)}
+    normal_keys = (
+        {row.get("junction_key", "") for row in rows(args.normal_junctions)}
+        if args.normal_junctions
+        else set()
+    )
     classes = {
         row["isoform"]: row
         for row in rows(args.sqanti_classification)
@@ -126,11 +144,13 @@ def main() -> int:
         key = ":".join(exon_key)
         if key in shortread_keys:
             continue
+        if key in normal_keys:
+            continue
         structural_category = classes[isoform]["structural_category"]
         unique_coverage = int(float(junction.get("total_coverage_unique") or 0))
         if structural_category != "fusion" and junction.get("junction_category") != "novel":
             continue
-        if unique_coverage < 3 or junction.get("canonical", "").lower() != "canonical":
+        if unique_coverage < args.min_junction_reads or junction.get("canonical", "").lower() != "canonical":
             continue
         item = dict(junction)
         item["junction_key"] = key
@@ -168,7 +188,7 @@ def main() -> int:
             reason_counts["predicted_nmd"] += 1
             continue
         try:
-            if number(cls.get("psauron_score")) < 0.8:
+            if number(cls.get("psauron_score")) < args.min_psauron_score:
                 reason_counts["low_psauron_score"] += 1
                 continue
         except ValueError:
@@ -213,7 +233,7 @@ def main() -> int:
                         continue
                     seen_event_pairs.add(event_pair)
                     output_row = {
-                            "sample_id": "M1ML150017383",
+                            "sample_id": args.sample_id,
                             "event_id": event_id,
                             "peptide_id": f"{isoform}_{item['junction_number']}_{length}_{start + 1}",
                             "peptide": peptide,
@@ -240,7 +260,7 @@ def main() -> int:
                     prediction_pairs.setdefault(
                         (peptide, allele),
                         {
-                            "sample_id": "M1ML150017383",
+                            "sample_id": args.sample_id,
                             "peptide": peptide,
                             "hla_allele": allele,
                             "source_tool": "IsoQuant+SQANTI3+TD2",
@@ -268,6 +288,8 @@ def main() -> int:
         "status": "PASS",
         "abnormal_categories": sorted(ABNORMAL),
         "shortread_junction_keys": len(shortread_keys),
+        "normal_background_status": "ASSESSED" if args.normal_junctions else "UNASSESSED",
+        "normal_background_junction_keys": len(normal_keys),
         "longrna_unique_abnormal_junction_rows": len(selected),
         "longrna_unique_abnormal_isoforms": len(wanted),
         "junction_peptide_hla_rows": len(peptide_rows),
@@ -275,7 +297,11 @@ def main() -> int:
         "unique_peptide_hla_pairs": len(prediction_pairs),
         "mhc1_peptide_lengths": list(peptide_lengths),
         "high_recall_12mer": 12 in peptide_lengths,
-        "selection_policy": "novel junction (fusion excepted), unique coverage >=3, canonical, complete CDS, PSAURON >=0.8, non-NMD",
+        "selection_policy": (
+            "novel junction (fusion excepted), "
+            f"unique coverage >={args.min_junction_reads}, canonical, complete CDS, "
+            f"PSAURON >={args.min_psauron_score}, non-NMD, absent from supplied normal background"
+        ),
         "excluded_reasons": dict(reason_counts),
     }
     (args.outdir / "longrna_unique_candidate_summary.json").write_text(

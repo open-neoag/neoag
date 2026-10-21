@@ -32,7 +32,8 @@ def main() -> int:
     output = []
     missing = []
     for row in provenance:
-        key = (row.get("peptide", ""), row.get("hla", ""))
+        allele = row.get("hla_allele") or row.get("hla", "")
+        key = (row.get("peptide", ""), allele)
         pred = index.get(key)
         merged = dict(row)
         if pred is None:
