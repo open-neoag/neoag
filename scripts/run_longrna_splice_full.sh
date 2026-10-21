@@ -164,7 +164,12 @@ on_exit() {
 trap on_exit EXIT
 
 if [[ -e "$WORKDIR/.isoquant_complete" ]]; then
-  record isoquant_transcript_reconstruction REUSED "completion marker already exists"
+  mapfile -t gtfs < <(find "$WORKDIR/isoquant" -type f -name '*.transcript_models.gtf' -size +0c -print)
+  (( ${#gtfs[@]} == 1 )) || {
+    record isoquant_transcript_reconstruction FAILED "completion marker exists but transcript_model_gtf_count=${#gtfs[@]}"
+    exit 1
+  }
+  record isoquant_transcript_reconstruction REUSED "validated_gtf=${gtfs[0]}"
 else
   record isoquant_transcript_reconstruction RUNNING "fastq_files=${#FASTQS[@]}"
   log_command "$ISOQUANT_BIN" "${isoquant_args[@]}"

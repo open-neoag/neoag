@@ -72,6 +72,26 @@ STATUS="$WORKDIR/longrna_splice_status.tsv"
 [[ -e "$STATUS" ]] || printf 'stage\tstatus\tupdated_at\tdetail\n' > "$STATUS"
 record() { printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$(date -Iseconds)" "$3" >> "$STATUS"; }
 
+validate_outputs() {
+  classification="$WORKDIR/sqanti3/${SAMPLE_ID}_classification.txt"
+  junctions="$WORKDIR/sqanti3/${SAMPLE_ID}_junctions.txt"
+  corrected_gtf="$WORKDIR/sqanti3/${SAMPLE_ID}_corrected.gtf"
+  corrected_fasta="$WORKDIR/sqanti3/${SAMPLE_ID}_corrected.fasta"
+  for path in "$classification" "$junctions" "$corrected_gtf" "$corrected_fasta"; do
+    [[ -s "$path" ]] || { echo "ERROR: SQANTI3 output is missing or empty: $path" >&2; return 1; }
+  done
+  protein_candidates=(
+    "$WORKDIR/sqanti3/${SAMPLE_ID}_corrected.faa"
+    "$WORKDIR/sqanti3/TD2/${SAMPLE_ID}_corrected.fasta.TD2.pep"
+  )
+  protein=""
+  for path in "${protein_candidates[@]}"; do
+    if [[ -s "$path" ]]; then protein=$path; break; fi
+  done
+  [[ -n "$protein" ]] || { echo "ERROR: SQANTI3/TD2 protein output is missing" >&2; return 1; }
+  printf '%s\n' "$protein" > "$WORKDIR/sqanti3/protein_output.path"
+}
+
 if [[ -z "$ISOFORM_GTF" ]]; then
   mapfile -t candidates < <(find "$WORKDIR/isoquant" -type f -name '*.transcript_models.gtf' -size +0c -print | sort)
   (( ${#candidates[@]} == 1 )) || {
@@ -107,32 +127,20 @@ if (( DRY_RUN )); then
 fi
 
 if [[ -e "$WORKDIR/.sqanti3_complete" ]]; then
-  record sqanti3_structure_orf_annotation REUSED "completion marker already exists"
+  if ! validate_outputs; then
+    record sqanti3_structure_orf_annotation FAILED "completion marker exists but outputs failed validation"
+    exit 1
+  fi
+  record sqanti3_structure_orf_annotation REUSED "validated protein=$protein"
   exit 0
 fi
 
 record sqanti3_structure_orf_annotation RUNNING "isoforms=$ISOFORM_GTF"
 if "$SQANTI_PYTHON" "$SQANTI_HOME/sqanti3_qc.py" "${args[@]}" >> "$WORKDIR/logs/sqanti3.log" 2>&1; then
-  classification="$WORKDIR/sqanti3/${SAMPLE_ID}_classification.txt"
-  junctions="$WORKDIR/sqanti3/${SAMPLE_ID}_junctions.txt"
-  corrected_gtf="$WORKDIR/sqanti3/${SAMPLE_ID}_corrected.gtf"
-  corrected_fasta="$WORKDIR/sqanti3/${SAMPLE_ID}_corrected.fasta"
-  for path in "$classification" "$junctions" "$corrected_gtf" "$corrected_fasta"; do
-    [[ -s "$path" ]] || { record sqanti3_structure_orf_annotation FAILED "missing=$path"; exit 1; }
-  done
-  protein_candidates=(
-    "$WORKDIR/sqanti3/${SAMPLE_ID}_corrected.faa"
-    "$WORKDIR/sqanti3/TD2/${SAMPLE_ID}_corrected.fasta.TD2.pep"
-  )
-  protein=""
-  for path in "${protein_candidates[@]}"; do
-    if [[ -s "$path" ]]; then protein=$path; break; fi
-  done
-  [[ -n "$protein" ]] || {
-    record sqanti3_structure_orf_annotation FAILED "SQANTI3 completed without a TD2 protein output"
+  if ! validate_outputs; then
+    record sqanti3_structure_orf_annotation FAILED "SQANTI3 completed but outputs failed validation"
     exit 1
-  }
-  printf '%s\n' "$protein" > "$WORKDIR/sqanti3/protein_output.path"
+  fi
   touch "$WORKDIR/.sqanti3_complete"
   record sqanti3_structure_orf_annotation PASS "protein=$protein"
 else

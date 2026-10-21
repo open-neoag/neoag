@@ -155,3 +155,43 @@ def test_provenance_retention_controls_hashing(tmp_path: Path) -> None:
         manifest = json.loads(output.read_text())
         assert manifest["retention"] == retention
         assert ("sha256" in manifest["files"][0]) is expects_hash
+
+
+def test_downstream_resume_validates_outputs(tmp_path: Path) -> None:
+    work = tmp_path / "work"
+    isoquant = work / "isoquant" / "CASE-42"
+    sqanti_out = work / "sqanti3"
+    sqanti_home = tmp_path / "SQANTI3"
+    isoquant.mkdir(parents=True)
+    sqanti_out.mkdir(parents=True)
+    sqanti_home.mkdir()
+    write(isoquant / "CASE-42.transcript_models.gtf", "transcript\n")
+    write(sqanti_home / "sqanti3_qc.py", "# fixture\n")
+    reference = write(tmp_path / "reference.fa", ">chr1\nACGT\n")
+    annotation = write(tmp_path / "annotation.gtf", "annotation\n")
+    for suffix in ("classification.txt", "junctions.txt", "corrected.gtf", "corrected.fasta"):
+        write(sqanti_out / f"CASE-42_{suffix}", "fixture\n")
+    protein = write(sqanti_out / "CASE-42_corrected.faa", ">iso1\nAAAA\n")
+    write(work / ".sqanti3_complete", "complete\n")
+
+    command = [
+        "bash",
+        str(ROOT / "scripts" / "run_longrna_downstream.sh"),
+        "--sample-id",
+        "CASE-42",
+        "--workdir",
+        str(work),
+        "--reference-fasta",
+        str(reference),
+        "--annotation-gtf",
+        str(annotation),
+        "--sqanti-home",
+        str(sqanti_home),
+    ]
+    subprocess.run(command, check=True, capture_output=True, text=True)
+    assert (sqanti_out / "protein_output.path").read_text().strip() == str(protein)
+
+    protein.unlink()
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "outputs failed validation" in (work / "longrna_splice_status.tsv").read_text()

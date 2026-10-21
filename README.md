@@ -38,6 +38,10 @@ The key advantage is the neo peptiede identification process is expert-directed 
 
 ## Usage
 
+### Long-read RNA Splice Workflow
+
+The reproducible long-read RNA splice workflow is documented in [English](docs/LONGRNA_SPLICE_WORKFLOW.md) and [Chinese](docs/LONGRNA_SPLICE_WORKFLOW_CN.md). Its end-to-end entry point is `scripts/run_longrna_splice_full.sh`.
+
 ### System Requirements
 
 Requirements depend on assay size and enabled tools. The following baseline is intended for full production DNA/RNA analysis; review-only use can run with substantially fewer resources.
