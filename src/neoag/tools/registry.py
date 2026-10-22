@@ -282,6 +282,13 @@ class RunContext:
     def exe(self, tool: str) -> str:
         import os
         from pathlib import Path
+        if tool == "deepimmuno":
+            return (
+                self.executables.get("deepimmuno")
+                or self.executables.get("deepimmuno_dir")
+                or os.environ.get("DEEPIMMUNO_DIR")
+                or TOOL_REGISTRY[tool].executable
+            )
         if tool == "vep":
             return (
                 self.executables.get(tool)

@@ -222,6 +222,39 @@ def test_check_tools_runs():
     assert st.name == "netmhcpan"
 
 
+def test_deepimmuno_check_uses_configured_directory_alias(tmp_path):
+    from neoag.tools.runner import check_all_tools
+
+    script = tmp_path / "deepimmuno-cnn.py"
+    script.write_text("# fixture\n", encoding="utf-8")
+    statuses = {status.name: status for status in check_all_tools({"deepimmuno_dir": str(tmp_path)})}
+
+    assert statuses["deepimmuno"].available is True
+    assert statuses["deepimmuno"].resolved_path == str(script.resolve())
+    context = RunContext(sample_id="S1", outdir=tmp_path, executables={"deepimmuno_dir": str(tmp_path)})
+    assert context.exe("deepimmuno") == str(tmp_path)
+
+
+def test_check_tools_command_reads_executable_overrides_from_config(tmp_path, monkeypatch):
+    from argparse import Namespace
+    from neoag import cli
+
+    config = tmp_path / "run.toml"
+    config.write_text(
+        '[tools.executables]\ndeepimmuno_dir = "/opt/deepimmuno"\n',
+        encoding="utf-8",
+    )
+    captured = {}
+
+    def fake_check_all_tools(executables=None):
+        captured.update(executables or {})
+        return []
+
+    monkeypatch.setattr(cli, "check_all_tools", fake_check_all_tools)
+    cli.cmd_check_tools(Namespace(config=str(config)))
+    assert captured["deepimmuno_dir"] == "/opt/deepimmuno"
+
+
 def test_deepimmuno_external_uses_configured_python(tmp_path, monkeypatch):
     from neoag.adapters import deepimmuno as adapter
     from neoag.tools.runner import _run_deepimmuno_external

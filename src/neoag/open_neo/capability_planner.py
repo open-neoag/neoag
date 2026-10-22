@@ -758,14 +758,17 @@ def build_automatic_production_plan(
             decide("hla_loh", "consensus", "BLOCKED", "HLA file or recommended purity/CNV stage is unavailable")
 
     if tumor_rna_fastq:
-        routes.extend(["rna_expression", "fusion", "splice"])
+        routes.extend(["rna_expression", "splice"])
         rna_inputs = {**inputs, **refs, "hla_file": hla_file, "sample_id": sample_id}
         submanifest = manifest.with_name("rna_fusion_splice.generated.toml")
         generated = generate_rna_fusion_splice_manifest(rna_inputs, submanifest, project_root=root, outdir=target)
         rna_cfg = load_production_manifest(submanifest)
-        for name, spec in (rna_cfg.get("stages") or {}).items():
+        rna_stages = rna_cfg.get("stages") or {}
+        for name, spec in rna_stages.items():
             if name not in stages:
                 stages[name] = spec
+        if any(name in rna_stages for name in ("easyfuse_discovery", "fusion_candidate_union", "fusion_peptide_generation")):
+            routes.append("fusion")
         evidence.update(rna_cfg.get("evidence") or {})
         for name, tool in (
             ("rna_expression", "salmon"), ("rsem_expression_crosscheck", "rsem"),

@@ -81,6 +81,16 @@ def test_easyfuse_pass_plus_internal_high_confidence_union(tmp_path):
     assert evidence["candidate_union_source"] == "INTERNAL_CALLER_HIGH_CONFIDENCE"
 
 
+def test_easyfuse_union_can_reuse_pass_table_without_all_table():
+    rows, summary = build_easyfuse_candidate_union(FIXTURE)
+
+    assert rows
+    assert summary["pass_rows"] == len(rows)
+    assert summary["all_rows"] == 0
+    assert summary["internal_high_confidence_added"] == 0
+    assert all(row["openneo_union_source"] == "EASYFUSE_PASS" for row in rows)
+
+
 def test_parse_easyfuse_events_and_catalog():
     parsed = parse_easyfuse(FIXTURE, "S1", "default", lengths=(8, 9))
     assert len(parsed["events"]) == 2

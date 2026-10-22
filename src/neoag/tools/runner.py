@@ -160,7 +160,13 @@ def check_tool(name: str, executable: str | None = None) -> ToolStatus:
 
 def check_all_tools(executables: dict[str, str] | None = None) -> list[ToolStatus]:
     ex = executables or {}
-    return [check_tool(n, ex.get(n)) for n in TOOL_REGISTRY]
+    return [
+        check_tool(
+            name,
+            ex.get(name) or (ex.get("deepimmuno_dir") if name == "deepimmuno" else None),
+        )
+        for name in TOOL_REGISTRY
+    ]
 
 
 def _stub_copy(fixture: str, dest: Path) -> None:

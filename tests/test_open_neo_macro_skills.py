@@ -1204,6 +1204,51 @@ def test_rna_fastq_profile_generator_emits_full_dag(tmp_path: Path):
     }
 
 
+def test_rna_fastq_profile_can_disable_easyfuse_without_blocking_splice(tmp_path: Path):
+    inputs = _rna_profile_inputs(tmp_path)
+    inputs["easyfuse_enabled"] = False
+    inputs.pop("easyfuse_ref")
+    result = generate_rna_fusion_splice_manifest(
+        inputs,
+        tmp_path / "profile-no-easyfuse.toml",
+        project_root=Path.cwd(),
+        outdir=tmp_path / "run",
+    )
+
+    assert result["ready_for_execute"] is True
+    parsed = load_production_manifest(result["manifest"])
+    stages = parsed["stages"]
+    assert "easyfuse_discovery" not in stages
+    assert "fusion_candidate_union" not in stages
+    assert "fusion_cross_validation" not in stages
+    assert "fusion_peptide_generation" not in stages
+    assert "rna_expression" in stages
+    assert "splice_candidate_normalization" in stages
+    assert parsed["run"]["expected_peptide_sources"] == ["SNAF", "SpliceMutr"]
+
+
+def test_rna_fastq_profile_reuses_easyfuse_output_without_reference(tmp_path: Path):
+    inputs = _rna_profile_inputs(tmp_path)
+    inputs.pop("easyfuse_ref")
+    inputs["easyfuse_pass_csv"] = str(Path.cwd() / "data/fixtures/easyfuse_fusions.pass.tsv")
+    result = generate_rna_fusion_splice_manifest(
+        inputs,
+        tmp_path / "profile-reuse-easyfuse.toml",
+        project_root=Path.cwd(),
+        outdir=tmp_path / "run",
+    )
+
+    assert result["ready_for_execute"] is True
+    parsed = load_production_manifest(result["manifest"])
+    stages = parsed["stages"]
+    assert "easyfuse_discovery" not in stages
+    assert "fusion_candidate_union" in stages
+    assert stages["fusion_candidate_union"].get("depends_on") is None
+    assert inputs["easyfuse_pass_csv"] in stages["fusion_candidate_union"]["command"]
+    assert "--all-csv" not in stages["fusion_candidate_union"]["command"]
+    assert "fusion_peptide_generation" in stages
+
+
 def test_rna_fastq_profile_enriches_splice_qc_from_star_and_bam(tmp_path: Path):
     inputs = _rna_profile_inputs(tmp_path)
     normal_junctions = tmp_path / "normal_junctions.tsv"

@@ -218,14 +218,14 @@ def is_internal_caller_high_confidence(
 
 def build_easyfuse_candidate_union(
     pass_path: str | Path,
-    all_path: str | Path,
+    all_path: str | Path | None = None,
     *,
     filter_cfg: EasyFuseFilterConfig | None = None,
 ) -> tuple[list[dict[str, str]], dict[str, object]]:
     """Return EasyFuse pass rows unioned with internal-caller high-confidence rows."""
     cfg = filter_cfg or EasyFuseFilterConfig()
     pass_rows = read_easyfuse_table(pass_path)
-    all_rows = read_easyfuse_table(all_path)
+    all_rows = read_easyfuse_table(all_path) if all_path else []
     union_rows: list[dict[str, str]] = []
     seen: set[tuple[str, str, str]] = set()
     internal_rescue_count = 0

@@ -125,6 +125,13 @@ source conf/tools.env.sh
 neoag check-tools
 ```
 
+When DeepImmuno is configured in a run TOML instead of the shell environment,
+validate the same configuration with:
+
+```bash
+neoag check-tools --config /path/to/run.toml
+```
+
 ### 4.6 PRIME / MixMHCpred / BigMHC
 
 ```bash

@@ -398,14 +398,17 @@ def cmd_vep_annotate(args):
     print(f'  variants_vcf = "{result["annotated_vcf"]}"')
 
 
-def cmd_check_tools(_args):
+def cmd_check_tools(args):
+    cfg = load_run_config(args.config) if getattr(args, "config", None) else {}
+    tools = cfg.get("tools", {}) if cfg else {}
+    executables = {k: str(v) for k, v in (tools.get("executables") or {}).items()}
     tools_env = ROOT / "conf" / "tools.env.sh"
     if tools_env.is_file() and not __import__("os").environ.get("NEOAG_CONDA_ENV"):
         print(f"Tip: source {tools_env}  # activates neoag-tools conda env on PATH")
         print()
     print(f"{'Tool':<14} {'Executable':<22} {'Status':<10} Message")
     print("-" * 72)
-    for st in check_all_tools():
+    for st in check_all_tools(executables):
         status = "OK" if st.available else "MISSING"
         print(f"{st.name:<14} {st.executable:<22} {status:<10} {st.message}")
     print()
@@ -1413,6 +1416,7 @@ def build_parser():
     evp.set_defaults(func=cmd_extract_variant_peptides)
 
     ct = sub.add_parser("check-tools", help="Check availability of integrated bioinformatics tools")
+    ct.add_argument("--config", help="Optional run TOML containing tools.executables overrides")
     ct.set_defaults(func=cmd_check_tools)
 
     rt = sub.add_parser("run-tool", help="Run a single upstream tool (netmhcpan, mhcflurry, pvacseq, ...)")

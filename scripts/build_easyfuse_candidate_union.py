@@ -12,7 +12,7 @@ from neoag.adapters.easyfuse_adapter import build_easyfuse_candidate_union
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pass-csv", required=True, type=Path)
-    parser.add_argument("--all-csv", required=True, type=Path)
+    parser.add_argument("--all-csv", type=Path, help="Optional full EasyFuse table used to rescue high-confidence internal-caller rows")
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--summary", required=True, type=Path)
     args = parser.parse_args()

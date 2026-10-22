@@ -16,7 +16,10 @@ inputs:
   # automatically when production_manifest is not supplied.
   star_index: /ref/GRCh38/star_index
   ctat_genome_lib: /ref/ctat/current
+  easyfuse_enabled: true # false: skip fusion branch; expression/splice still run
   easyfuse_ref: /ref/easyfuse/easyfuse_ref_v4
+  easyfuse_pass_csv: "" # reuse fusions.pass.csv and bypass discovery/reference
+  easyfuse_all_csv: ""  # optional fusions.csv for internal-caller rescue
   normal_readthrough: /ref/fusion/normal_readthrough.tsv
   snaf_workflow: ""       # optional; must emit snaf_candidates.tsv
   splicemutr_workflow: "" # optional; must emit splicemutr_candidates.tsv
