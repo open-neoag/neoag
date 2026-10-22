@@ -1,6 +1,6 @@
 # NeoAg longRNA splice 工作流使用说明
 
-本文说明如何使用 `scripts/run_longrna_splice_full.sh`，从长读长 RNA FASTQ 开始完成 transcript 重建、SQANTI3/TD2 注释、异常 splice junction 筛选、junction-spanning peptide 生成、MHC 预测和综合证据合并。
+本文说明如何使用 `scripts/run_longrna_splice_full.sh`，从长读长 RNA FASTQ 或既有 IsoQuant 结果开始，完成 transcript 重建或复用、SQANTI3/TD2 注释、异常 splice junction 筛选、junction-spanning peptide 生成、MHC 预测和综合证据合并。
 
 该流程用于研究级候选筛选和证据整理，不构成临床诊断或治疗建议。
 
@@ -181,6 +181,39 @@ bash scripts/run_longrna_splice_full.sh \
 ```
 
 不需要的可选参数可以删除。
+
+### 5.1 从已有 IsoQuant 结果开始
+
+如果 IsoQuant 已经成功完成，可以跳过 FASTQ 处理和转录本重建，直接复用其结果：
+
+```bash
+bash scripts/run_longrna_splice_full.sh \
+  --start-from isoquant \
+  --isoquant-result-dir /data/CASE001/isoquant \
+  --sample-id CASE001 \
+  --workdir /work/CASE001/from_isoquant \
+  --reference-fasta /refs/GRCh38.fa \
+  --annotation-gtf /refs/gencode.gtf \
+  --hla /data/CASE001/hla.txt \
+  --shortread-comparisons /data/CASE001/shortread_junctions.tsv \
+  --normal-junctions /refs/normal_junctions.tsv \
+  --star-junctions /data/CASE001/SJ.out.tab \
+  --sqanti-home /tools/SQANTI3 \
+  --sqanti-python /envs/sqanti3/bin/python \
+  --threads 16 \
+  --retention standard
+```
+
+该目录及其子目录中必须有且只有一个非空的 `*.transcript_models.gtf`。脚本会：
+
+- 将 IsoQuant 阶段记为 `REUSED`，不再次执行 IsoQuant。
+- 将外部结果目录和实际采用的 GTF 记录到 provenance。
+- 在工作目录写入 `isoquant_transcript_model.path`，供续跑和最终验证使用。
+- 将该 GTF 通过 `--isoform-gtf` 显式传给 SQANTI3/TD2 下游阶段。
+
+此模式不接受 `--input-dir`、`--reference-index` 和 `--illumina-bam`。`--star-junctions` 仍可用于 SQANTI3 短读长 junction coverage。必须保证 `--reference-fasta` 和 `--annotation-gtf` 与原 IsoQuant 运行完全一致，否则坐标与转录本解释可能不一致。
+
+`--retention full` 会清点并哈希当前仍存在的外部 IsoQuant 结果，但无法恢复原运行中已经被删除的临时文件。
 
 ## 6. 完整审计运行
 

@@ -8,8 +8,22 @@ check() {
 }
 check "$STATUS"
 check "$WORKDIR/README.workflow.txt"
+if [[ -s "$WORKDIR/isoquant_transcript_model.path" ]]; then
+  isoform_gtf=$(<"$WORKDIR/isoquant_transcript_model.path")
+  if [[ -s "$isoform_gtf" ]]; then
+    printf 'PASS\t%s -> %s\n' "$WORKDIR/isoquant_transcript_model.path" "$isoform_gtf"
+  else
+    printf 'MISSING\t%s -> %s\n' "$WORKDIR/isoquant_transcript_model.path" "$isoform_gtf"
+    fail=1
+  fi
+else
+  found=0
+  for f in "$WORKDIR"/isoquant/*/*.transcript_models.gtf; do
+    if [[ -e "$f" ]]; then check "$f"; found=1; fi
+  done
+  if (( found == 0 )); then printf 'MISSING\t%s\n' "$WORKDIR/isoquant/*/*.transcript_models.gtf"; fail=1; fi
+fi
 for pattern in \
-  "$WORKDIR/isoquant/*/*.transcript_models.gtf" \
   "$WORKDIR/sqanti3/*_classification.txt" \
   "$WORKDIR/translation/*.pep" \
   "$WORKDIR/comprehensive_evidence.tsv"; do

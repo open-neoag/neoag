@@ -10,11 +10,45 @@ ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "scripts" / "build_longrna_unique_splice_peptides.py"
 MERGE = ROOT / "scripts" / "merge_longrna_comprehensive_evidence.py"
 PROVENANCE = ROOT / "scripts" / "capture_longrna_provenance.py"
+FULL_RUNNER = ROOT / "scripts" / "run_longrna_splice_full.sh"
 
 
 def write(path: Path, content: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     return path
+
+
+def isoquant_dry_run_command(tmp_path: Path, result_dir: Path) -> list[str]:
+    reference = write(tmp_path / "reference.fa", ">chr1\nACGT\n")
+    annotation = write(tmp_path / "annotation.gtf", "annotation\n")
+    hla = write(tmp_path / "hla.txt", "HLA-A*02:01\n")
+    shortread = write(tmp_path / "shortread.tsv", "junction_key\n")
+    sqanti_home = tmp_path / "SQANTI3"
+    write(sqanti_home / "sqanti3_qc.py", "# fixture\n")
+    return [
+        "bash",
+        str(FULL_RUNNER),
+        "--start-from",
+        "isoquant",
+        "--isoquant-result-dir",
+        str(result_dir),
+        "--sample-id",
+        "CASE-42",
+        "--workdir",
+        str(tmp_path / "work"),
+        "--reference-fasta",
+        str(reference),
+        "--annotation-gtf",
+        str(annotation),
+        "--hla",
+        str(hla),
+        "--shortread-comparisons",
+        str(shortread),
+        "--sqanti-home",
+        str(sqanti_home),
+        "--dry-run",
+    ]
 
 
 def candidate_command(tmp_path: Path, *, normal: bool) -> tuple[list[str], Path]:
@@ -195,3 +229,72 @@ def test_downstream_resume_validates_outputs(tmp_path: Path) -> None:
     result = subprocess.run(command, check=False, capture_output=True, text=True)
     assert result.returncode != 0
     assert "outputs failed validation" in (work / "longrna_splice_status.tsv").read_text()
+
+
+def test_full_runner_accepts_existing_isoquant_result_without_fastq(tmp_path: Path) -> None:
+    result_dir = tmp_path / "existing_isoquant"
+    isoform_gtf = write(
+        result_dir / "CASE-42" / "CASE-42.transcript_models.gtf",
+        "transcript\n",
+    )
+    result = subprocess.run(
+        isoquant_dry_run_command(tmp_path, result_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "start_from=isoquant" in result.stdout
+    assert "isoquant_stage=REUSED" in result.stdout
+    assert f"isoform_gtf={isoform_gtf}" in result.stdout
+    assert "isoquant_command=" not in result.stdout
+
+
+def test_full_runner_rejects_ambiguous_isoquant_results(tmp_path: Path) -> None:
+    result_dir = tmp_path / "existing_isoquant"
+    write(result_dir / "run1" / "one.transcript_models.gtf", "one\n")
+    write(result_dir / "run2" / "two.transcript_models.gtf", "two\n")
+    result = subprocess.run(
+        isoquant_dry_run_command(tmp_path, result_dir),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "expected exactly one non-empty" in result.stderr
+
+
+def test_verifier_accepts_external_isoquant_gtf_pointer(tmp_path: Path) -> None:
+    work = tmp_path / "work"
+    external_gtf = write(tmp_path / "isoquant" / "CASE-42.transcript_models.gtf", "transcript\n")
+    write(work / "longrna_splice_status.tsv", "stage\tstatus\tupdated_at\tdetail\n")
+    write(work / "README.workflow.txt", "sample_id=CASE-42\n")
+    write(work / "isoquant_transcript_model.path", f"{external_gtf}\n")
+    write(work / "sqanti3" / "CASE-42_classification.txt", "classification\n")
+    write(work / "translation" / "CASE-42.pep", ">iso1\nAAAA\n")
+    write(work / "comprehensive_evidence.tsv", "sample_id\n")
+
+    result = subprocess.run(
+        ["bash", str(ROOT / "scripts" / "verify_longrna_splice.sh"), str(work)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "workflow_status=PASS" in result.stdout
+    assert str(external_gtf) in result.stdout
+
+
+def test_full_runner_rejects_resume_mode_mismatch(tmp_path: Path) -> None:
+    result_dir = tmp_path / "existing_isoquant"
+    write(result_dir / "CASE-42" / "CASE-42.transcript_models.gtf", "transcript\n")
+    work = tmp_path / "work"
+    write(work / "longrna_splice_status.tsv", "stage\tstatus\tupdated_at\tdetail\n")
+    write(work / "README.workflow.txt", "sample_id=CASE-42\nstart_from=fastq\n")
+    command = isoquant_dry_run_command(tmp_path, result_dir)
+    command.remove("--dry-run")
+    command.append("--resume")
+
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "resume mode mismatch" in result.stderr

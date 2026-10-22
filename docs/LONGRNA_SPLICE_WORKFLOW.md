@@ -1,10 +1,10 @@
 # Long-read RNA splice workflow
 
-`scripts/run_longrna_splice_full.sh` is the supported end-to-end entry point for a new sample. It runs IsoQuant, SQANTI3 with TD2 ORF prediction, long-read-specific junction filtering, peptide generation, presentation prediction, evidence merging, and output verification.
+`scripts/run_longrna_splice_full.sh` is the supported end-to-end entry point for a new sample. It can start from long-read FASTQ or reuse an existing IsoQuant result, then runs SQANTI3 with TD2 ORF prediction, long-read-specific junction filtering, peptide generation, presentation prediction, evidence merging, and output verification.
 
 ## Required inputs
 
-- Long-read FASTQ files from one sample
+- Long-read FASTQ files from one sample, or an existing IsoQuant result directory
 - A genome FASTA and matching annotation GTF
 - A sample HLA allele list
 - A TSV with a `junction_key` column for short-read comparison
@@ -33,6 +33,29 @@ bash scripts/run_longrna_splice_full.sh \
 ```
 
 Use `--dry-run` to validate paths and inspect the IsoQuant command. Use `--resume` only with the same sample, references, and input definitions; completed stages are reused through explicit marker files.
+
+## Start from an existing IsoQuant result
+
+Use this mode when IsoQuant has already completed and its transcript-model GTF is available:
+
+```bash
+bash scripts/run_longrna_splice_full.sh \
+  --start-from isoquant \
+  --isoquant-result-dir /data/CASE001/isoquant \
+  --sample-id CASE001 \
+  --workdir /work/CASE001/from_isoquant \
+  --reference-fasta /refs/GRCh38.fa \
+  --annotation-gtf /refs/gencode.gtf \
+  --hla /data/CASE001/hla.txt \
+  --shortread-comparisons /data/CASE001/shortread_junctions.tsv \
+  --sqanti-home /tools/SQANTI3 \
+  --sqanti-python /envs/sqanti3/bin/python \
+  --threads 16
+```
+
+The result directory must contain exactly one non-empty `*.transcript_models.gtf`, including in nested subdirectories. The workflow records the external directory and selected GTF, writes their resolved path to `isoquant_transcript_model.path`, marks the IsoQuant stage as `REUSED`, and passes the GTF explicitly to the downstream stage. `--input-dir`, `--reference-index`, and `--illumina-bam` are not accepted in this mode.
+
+The reference FASTA and annotation GTF must match those used for the original IsoQuant run. Full retention inventories and hashes the available external result, but cannot recover temporary files that were already removed by the earlier IsoQuant run.
 
 ## Retention and provenance
 
